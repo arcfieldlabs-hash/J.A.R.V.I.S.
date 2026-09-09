@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -53,6 +54,13 @@ class ToolKit:
             "notify": self.notify,
             "set_volume": self.set_volume,
             "open_url": self.open_url,
+            # Desktop control
+            "activate_app": self.activate_app,
+            "frontmost_app": self.frontmost_app,
+            "screenshot": self.screenshot,
+            "list_windows": self.list_windows,
+            # Google via gog CLI (if installed)
+            "google": self.google,
         }
         tool = tools.get(name)
         if tool is None:
@@ -62,11 +70,12 @@ class ToolKit:
         except Exception as exc:
             return ToolResult(False, f"{type(exc).__name__}: {exc}")
 
+    # ── Core tools ──────────────────────────────────────────────
+
     def open_app(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
         app_name = str(args.get("name", "")).strip()
         if not app_name:
             return ToolResult(False, "Missing app name.")
-
         completed = subprocess.run(["open", "-a", app_name], capture_output=True, text=True)
         if completed.returncode != 0:
             return ToolResult(False, completed.stderr.strip() or f"Could not open {app_name}.")
@@ -82,12 +91,8 @@ class ToolKit:
             return ToolResult(False, "User denied command execution.")
 
         completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(self.workspace),
-            capture_output=True,
-            text=True,
-            timeout=60,
+            command, shell=True, cwd=str(self.workspace),
+            capture_output=True, text=True, timeout=60,
         )
         output = "\n".join(part for part in [completed.stdout, completed.stderr] if part).strip()
         if not output:
@@ -98,8 +103,7 @@ class ToolKit:
 
     def web_search(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
         query = str(args.get("query", "")).strip()
-        limit = int(args.get("limit", 5) or 5)
-        limit = max(1, min(limit, 8))
+        limit = max(1, min(int(args.get("limit", 5) or 5), 8))
         if not query:
             return ToolResult(False, "Missing search query.")
 
@@ -117,9 +121,7 @@ class ToolKit:
         if not results:
             return ToolResult(False, "No search results were parsed.")
 
-        lines = []
-        for index, result in enumerate(results, start=1):
-            lines.append(f"{index}. {result['title']}\n   {result['url']}")
+        lines = [f"{i}. {r['title']}\n   {r['url']}" for i, r in enumerate(results, 1)]
         return ToolResult(True, "\n".join(lines))
 
     def read_file(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
@@ -174,41 +176,15 @@ class ToolKit:
         return ToolResult(True, "\n".join(entries) or "(empty)")
 
     def system_status(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
-        """Gather a concise system status report for the Mac."""
         parts: list[str] = []
-
-        # Battery
         try:
-            batt = subprocess.run(
-                ["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5
-            )
+            batt = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5)
             if batt.returncode == 0:
                 lines = [ln.strip() for ln in batt.stdout.splitlines() if ln.strip()]
                 parts.append("Battery: " + (" | ".join(lines[-2:]) if lines else "unknown"))
         except Exception:
             parts.append("Battery: unavailable")
 
-        # Memory pressure / free
-        try:
-            mem = subprocess.run(
-                ["memory_pressure"], capture_output=True, text=True, timeout=5
-            )
-            if mem.returncode == 0:
-                for line in mem.stdout.splitlines():
-                    if "System-wide memory free percentage" in line or "Pages free" in line:
-                        parts.append(line.strip())
-                        break
-                else:
-                    parts.append("Memory: " + mem.stdout.strip()[:120])
-        except Exception:
-            try:
-                vm = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
-                if vm.returncode == 0:
-                    parts.append("Memory (vm_stat summary available)")
-            except Exception:
-                parts.append("Memory: unavailable")
-
-        # CPU load
         try:
             load = subprocess.run(["uptime"], capture_output=True, text=True, timeout=5)
             if load.returncode == 0:
@@ -216,11 +192,8 @@ class ToolKit:
         except Exception:
             parts.append("Load: unavailable")
 
-        # Disk space for root / home
         try:
-            df = subprocess.run(
-                ["df", "-h", "/"], capture_output=True, text=True, timeout=5
-            )
+            df = subprocess.run(["df", "-h", "/"], capture_output=True, text=True, timeout=5)
             if df.returncode == 0:
                 lines = df.stdout.strip().splitlines()
                 if len(lines) >= 2:
@@ -228,23 +201,17 @@ class ToolKit:
         except Exception:
             parts.append("Disk: unavailable")
 
-        if not parts:
-            return ToolResult(False, "Could not gather system status.")
-        return ToolResult(True, "\n".join(parts))
+        return ToolResult(True, "\n".join(parts) if parts else "Could not gather system status.")
 
     def notify(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
         title = str(args.get("title", "JARVIS")).strip() or "JARVIS"
         message = str(args.get("message", "")).strip()
         if not message:
             return ToolResult(False, "Missing notification message.")
-
-        # Escape for AppleScript
-        title_esc = title.replace('\\', '\\\\').replace('"', '\\"')
-        msg_esc = message.replace('\\', '\\\\').replace('"', '\\"')
+        title_esc = title.replace("\\", "\\\\").replace('"', '\\"')
+        msg_esc = message.replace("\\", "\\\\").replace('"', '\\"')
         script = f'display notification "{msg_esc}" with title "{title_esc}"'
-        completed = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, timeout=10
-        )
+        completed = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
         if completed.returncode != 0:
             return ToolResult(False, completed.stderr.strip() or "Notification failed.")
         return ToolResult(True, f"Notification shown: {title} — {message}")
@@ -255,11 +222,9 @@ class ToolKit:
         except (TypeError, ValueError):
             return ToolResult(False, "Volume level must be an integer 0-100.")
         level = max(0, min(100, level))
-
-        # macOS volume is 0-100 via osascript
-        script = f"set volume output volume {level}"
         completed = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, timeout=5
+            ["osascript", "-e", f"set volume output volume {level}"],
+            capture_output=True, text=True, timeout=5,
         )
         if completed.returncode != 0:
             return ToolResult(False, completed.stderr.strip() or "Could not set volume.")
@@ -271,11 +236,122 @@ class ToolKit:
             return ToolResult(False, "Missing URL.")
         if not url.startswith(("http://", "https://", "file://")):
             url = "https://" + url
-
         completed = subprocess.run(["open", url], capture_output=True, text=True)
         if completed.returncode != 0:
             return ToolResult(False, completed.stderr.strip() or f"Could not open {url}.")
         return ToolResult(True, f"Opened {url}.")
+
+    # ── Desktop control ─────────────────────────────────────────
+
+    def activate_app(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        """Bring an already-running app to the front."""
+        name = str(args.get("name", "")).strip()
+        if not name:
+            return ToolResult(False, "Missing app name.")
+        script = f'tell application "{name}" to activate'
+        completed = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+        if completed.returncode != 0:
+            return ToolResult(False, completed.stderr.strip() or f"Could not activate {name}.")
+        return ToolResult(True, f"Activated {name}.")
+
+    def frontmost_app(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        script = 'tell application "System Events" to get name of first application process whose frontmost is true'
+        completed = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=5)
+        if completed.returncode != 0:
+            return ToolResult(False, completed.stderr.strip() or "Could not determine frontmost app.")
+        return ToolResult(True, completed.stdout.strip() or "unknown")
+
+    def screenshot(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        """Capture the screen (or a window) into the workspace."""
+        filename = str(args.get("filename", "screenshot.png")).strip() or "screenshot.png"
+        if "/" in filename or "\\" in filename:
+            filename = Path(filename).name
+        dest = self.workspace / filename
+        # -x = no sound, -t png
+        completed = subprocess.run(
+            ["screencapture", "-x", "-t", "png", str(dest)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if completed.returncode != 0:
+            return ToolResult(False, completed.stderr.strip() or "Screenshot failed.")
+        return ToolResult(True, f"Screenshot saved to {dest}")
+
+    def list_windows(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        """List open windows (requires Accessibility permission)."""
+        script = '''
+tell application "System Events"
+    set winList to {}
+    repeat with proc in (every process whose background only is false)
+        try
+            set appName to name of proc
+            repeat with w in (every window of proc)
+                set end of winList to (appName & ": " & name of w)
+            end repeat
+        end try
+    end repeat
+    return winList
+end tell
+'''
+        completed = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=15)
+        if completed.returncode != 0:
+            return ToolResult(
+                False,
+                completed.stderr.strip()
+                or "Could not list windows. Grant Accessibility permission to Terminal/Python in System Settings → Privacy & Security → Accessibility.",
+            )
+        raw = completed.stdout.strip()
+        if not raw:
+            return ToolResult(True, "(no windows found)")
+        # osascript returns comma-separated list
+        items = [x.strip() for x in raw.split(",") if x.strip()]
+        return ToolResult(True, "\n".join(items[:40]) + ("\n..." if len(items) > 40 else ""))
+
+    # ── Google via gog CLI ──────────────────────────────────────
+
+    def google(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        """Run a gog CLI command for Gmail / Calendar / Drive / Docs / Sheets / Contacts.
+
+        Requires the `gog` binary (https://github.com/teru-0529/gog or brew install).
+        Example args: {"command": "gmail list --unread --limit 5"}
+                      {"command": "calendar list --today"}
+                      {"command": "drive search 'quarterly report'"}
+        """
+        if not shutil.which("gog"):
+            return ToolResult(
+                False,
+                "gog CLI not found. Install it (e.g. `brew install teru-0529/tap/gog` or from GitHub), "
+                "then run `gog auth login` to connect your Google accounts.",
+            )
+        command = str(args.get("command", "")).strip()
+        if not command:
+            return ToolResult(
+                False,
+                "Missing gog command. Examples: 'gmail list --unread', 'calendar list --today', "
+                "'drive search report', 'docs list', 'contacts search Alice'.",
+            )
+        # Safety: only allow known subcommands
+        first = command.split()[0].lower() if command else ""
+        allowed = {"gmail", "calendar", "drive", "docs", "sheets", "contacts", "tasks", "auth", "help", "--help"}
+        if first not in allowed and not first.startswith("-"):
+            return ToolResult(False, f"Unsupported gog subcommand: {first}. Allowed: {', '.join(sorted(allowed))}")
+
+        full = f"gog {command}"
+        # Google actions that send/modify should ask permission
+        mutating = any(kw in command.lower() for kw in ("send", "create", "delete", "update", "upload", "trash", "remove"))
+        if mutating and not self._ask_permission(full, why or "Google action that may modify data"):
+            return ToolResult(False, "User denied Google action.")
+
+        completed = subprocess.run(
+            full, shell=True, capture_output=True, text=True, timeout=60,
+        )
+        output = "\n".join(p for p in [completed.stdout, completed.stderr] if p).strip()
+        if len(output) > MAX_COMMAND_OUTPUT:
+            output = output[:MAX_COMMAND_OUTPUT] + "\n...[truncated]"
+        if not output:
+            output = f"gog exited with code {completed.returncode}"
+        return ToolResult(completed.returncode == 0, output)
+
+    # ── Helpers ─────────────────────────────────────────────────
 
     def _safe_path(self, user_path: str) -> Path | None:
         if not user_path:
@@ -294,7 +370,7 @@ class ToolKit:
         return any(re.search(pattern, lowered) for pattern in DANGEROUS_COMMAND_PATTERNS)
 
     def _ask_permission(self, command: str, why: str) -> bool:
-        print("\nJARVIS requires your authorisation to run a command:")
+        print("\nJARVIS requires your authorisation:")
         if why:
             print(f"Reason: {why}")
         print(f"Command: {command}")
@@ -315,8 +391,7 @@ class DuckDuckGoHTMLParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_dict = {key: value or "" for key, value in attrs}
-        classes = attrs_dict.get("class", "")
-        if tag == "a" and "result__a" in classes:
+        if tag == "a" and "result__a" in attrs_dict.get("class", ""):
             self._capturing = True
             self._href = attrs_dict.get("href", "")
             self._text = []

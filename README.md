@@ -4,130 +4,163 @@
 A private, local AI assistant inspired by the JARVIS of the Iron Man films.  
 Powered by Ollama on your Mac. Witty, formal, British, and useful.
 
-## What it can do
+Works standalone **and** as an OpenClaw skill.
 
-- Chat with dry British wit and address you as "Sir"
-- Speak answers using a British macOS voice (`Daniel` by default)
-- Open Mac apps
-- Run shell commands (after your explicit approval)
-- Search the web
-- Read / write / list files inside a safe workspace
-- Report system status (battery, memory, load, disk)
-- Show macOS notifications
-- Set system volume
-- Open URLs in the browser
+## Capabilities
 
-## 1. Install Ollama
+| Area | What you get |
+|------|----------------|
+| **Personality** | Dry British wit, addresses you as "Sir", anticipates needs |
+| **Voice** | macOS `say` with Daniel (British) by default |
+| **Desktop** | Open / activate apps, frontmost app, list windows, screenshots, volume, notifications |
+| **Files** | Safe read / write / list inside a workspace |
+| **Shell** | Commands with explicit approval + destructive-pattern blocking |
+| **Web** | DuckDuckGo search |
+| **System** | Battery, load, disk status |
+| **Google** | Gmail, Calendar, Drive, Docs, Sheets, Contacts via `gog` CLI |
+| **OpenClaw** | Drop-in skill so the lobster can speak and act as JARVIS |
 
-Install from [ollama.com](https://ollama.com), then make sure it is running:
+## Quick start
 
 ```bash
+# 1. Ollama
 ollama serve
-```
-
-Pull a good starter model:
-
-```bash
 ollama pull llama3.2:3b
-```
 
-You can change the model with `JARVIS_MODEL` or `--model`.
-
-## 2. Run Jarvis
-
-No third-party Python packages required.
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+# 2. Run
+python3 -m venv .venv && source .venv/bin/activate
 python3 -m jarvis --speak
 ```
 
-Or double-click `run_jarvis.command` in Finder.
+Or double-click `run_jarvis.command`.
 
-### Useful flags
+### Flags
 
 | Flag | Purpose |
 |------|---------|
-| `--speak` | Speak replies with macOS `say` |
-| `--voice Daniel` | Choose voice (default is Daniel) |
-| `--model llama3.2:3b` | Select Ollama model |
-| `--workspace ~/Documents` | Safe file workspace |
-| `--once "status"` | One-shot question |
-| `--no-tools` | Disable all tools |
+| `--speak` | Speak replies |
+| `--voice Daniel` | Choose voice |
+| `--model ...` | Ollama model |
+| `--workspace ~/Documents` | Safe file root |
+| `--once "question"` | One-shot |
+| `--no-tools` | Chat only |
 
-Environment variables: `JARVIS_MODEL`, `JARVIS_OLLAMA_URL`, `JARVIS_WORKSPACE`, `JARVIS_VOICE`.
+Env vars: `JARVIS_MODEL`, `JARVIS_OLLAMA_URL`, `JARVIS_WORKSPACE`, `JARVIS_VOICE`.
 
-## Movie-style examples
+## Desktop assistance
+
+Examples:
+
+```text
+Open Visual Studio Code.
+Activate Safari.
+What app is frontmost?
+List open windows.
+Take a screenshot and save it as desk.png.
+Set the volume to 35.
+Notify me that the build finished.
+```
+
+**Accessibility**: `list_windows` needs Terminal (or your Python) granted in  
+System Settings → Privacy & Security → Accessibility.
+
+## Google accounts (Gmail, Calendar, Drive, …)
+
+JARVIS uses the excellent **`gog`** CLI (same ecosystem OpenClaw uses).
+
+```bash
+# Install (example)
+brew install teru-0529/tap/gog   # or download from the gog releases
+
+# Connect your Google account(s)
+gog auth login
+```
+
+Then in JARVIS:
+
+```text
+Show my unread emails.
+What's on my calendar today?
+Search Drive for the quarterly report.
+Find contact Alice.
+```
+
+Under the hood this calls the `google` tool with a `gog ...` command.  
+Mutating actions (send / create / delete / upload) still require your confirmation.
+
+## OpenClaw integration
+
+### Option A — Use the included skill
+
+Copy the skill into your OpenClaw workspace:
+
+```bash
+cp -R openclaw ~/.openclaw/skills/jarvis
+# or wherever your OpenClaw skills directory lives
+```
+
+Then tell OpenClaw something like:
+
+> Use the jarvis skill. Good evening.
+
+OpenClaw will adopt the JARVIS personality and use the desktop + Google patterns described in `openclaw/SKILL.md`.
+
+### Option B — Run local JARVIS from OpenClaw
+
+OpenClaw can shell out to the pure-Python package:
+
+```bash
+python3 -m jarvis --once "System status"
+```
+
+or keep the full interactive CLI in a terminal while you message the OpenClaw gateway from WhatsApp / Telegram / Discord / etc.
+
+### Option C — Google inside OpenClaw directly
+
+Install the community Google skill as well:
+
+```bash
+clawhub install gog          # or the equivalent ClawHub / BetterClaw command
+```
+
+Then OpenClaw has first-class Gmail / Calendar / Drive tools; JARVIS personality remains available via the skill above.
+
+## Safety defaults
+
+- Shell and mutating Google actions require confirmation
+- Destructive shell patterns are blocked
+- File access sandboxed to the workspace
+- Model runs fully locally via Ollama
+- Web access only when you ask for a search
+
+## Example prompts
 
 ```text
 Good evening, JARVIS.
 What's the system status?
-Set the volume to 35.
-Notify me that the build finished.
-Open Visual Studio Code.
-Search the web for local-first AI assistants.
-Open https://github.com
-List the files in my workspace.
-Write a file called notes/plan.txt with a short launch plan.
+Open VS Code and activate it.
+Take a screenshot.
+Show unread mail.
+What's on my calendar today?
+Search Drive for budget spreadsheet.
+Set volume to 40 and notify me when done.
 ```
 
-## Siri / "Hey Jarvis"
+## Next ideas
 
-Create a Shortcut named **Ask Jarvis**:
-
-1. Shortcuts app → New Shortcut
-2. **Ask for Input** → prompt: `What should I ask Jarvis?`
-3. **Run Shell Script** → Pass Input: `to stdin`
-4. Script (adjust the path to your clone):
-
-```bash
-cd "/path/to/your/J.A.R.V.I.S."
-./jarvis_once.sh
-```
-
-5. **Speak Text** using the script result.
-
-Then say: **Hey Siri, Ask Jarvis**
-
-For a true wake phrase on Apple silicon:
-
-- System Settings → Accessibility → Speech → Vocal Shortcuts
-- Add action → Siri Request → "Ask Jarvis"
-- Phrase: `Hey Jarvis`
-
-## Safety defaults
-
-- Shell commands always require your confirmation
-- Destructive patterns are blocked
-- File access is sandboxed to the configured workspace
-- Model runs fully locally via Ollama
-- Web access only when you explicitly ask for a search
-
-## Next upgrades (ideas)
-
-- Local speech-to-text (Whisper / MLX Whisper / Vosk)
-- True continuous wake-word listening
-- Menu-bar companion app
-- Calendar, Reminders, Mail, HomeKit tools
-- Per-tool trusted permissions
-- Persistent memory / user preferences
+- Continuous wake-word listening
+- Menu-bar companion
+- Full Accessibility-driven mouse/keyboard automation (with tight allow-lists)
+- Native Google OAuth without the gog CLI
+- Persistent memory of preferences
 
 ## Troubleshooting
 
-**Could not reach Ollama**
-```bash
-ollama serve
-```
-
-**Model missing**
-```bash
-ollama pull llama3.2:3b
-```
-
-**Voice not found**  
-List available voices: `say -v '?'`  
-Then run with `--voice "Alex"` or set `JARVIS_VOICE`.
+**Ollama unreachable** → `ollama serve`  
+**Model missing** → `ollama pull llama3.2:3b`  
+**Voice missing** → `say -v '?'` then `--voice Alex`  
+**gog not found** → install + `gog auth login`  
+**Windows list fails** → grant Accessibility permission
 
 ---
 
