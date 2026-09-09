@@ -13,7 +13,6 @@ from .tools import ToolKit
 
 DEFAULT_MODEL = "llama3.2:3b"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-# Prefer the British male voice "Daniel" when available; fall back gracefully.
 DEFAULT_VOICE = os.getenv("JARVIS_VOICE", "Daniel")
 
 
@@ -24,14 +23,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", default=os.getenv("JARVIS_WORKSPACE", os.getcwd()))
     parser.add_argument("--speak", action="store_true", help="Speak answers using macOS say.")
     parser.add_argument("--voice", default=DEFAULT_VOICE, help="macOS say voice (default: Daniel)")
-    parser.add_argument("--no-tools", action="store_true", help="Disable app, shell, web, and file tools.")
+    parser.add_argument("--no-tools", action="store_true", help="Disable tools.")
     parser.add_argument("--once", help="Ask one question and exit.")
+    parser.add_argument("--menubar", action="store_true", help="Launch the optional menu-bar companion.")
     return parser
 
 
 def speak(text: str, voice: str = DEFAULT_VOICE) -> None:
     try:
-        # Try preferred voice first, fall back to system default if missing.
         cmd = ["say", "-v", voice, text[:4000]]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -48,24 +47,22 @@ Commands:
   :speak on|off     Toggle spoken answers
   :model            Show the active Ollama model
   :workspace        Show the safe file workspace
-  :status           Quick system status (via tools)
+  :status           Quick system status
   :quit             Exit
 
-Try saying:
-  "Good evening, JARVIS."
-  "What's the system status?"
-  "Open Visual Studio Code."
-  "Set the volume to 40."
-  "Notify me that the build is finished."
-  "Search the web for local-first personal assistants."
-  "List the files in my workspace."
-  "Write a file called notes/plan.txt with a 3-step launch plan."
+Also try:
+  python3 -m jarvis --menubar     # optional menu-bar app (needs rumps)
 """.strip()
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.menubar:
+        from . import menubar as mb
+        return mb.main()
+
     workspace = Path(args.workspace).expanduser().resolve()
     client = OllamaClient(base_url=args.ollama_url, model=args.model)
     toolkit = ToolKit(workspace=workspace)
@@ -76,14 +73,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.once:
         return ask_once(assistant, args.once, speak_answers, voice)
 
-    # Movie-style startup
     print("JARVIS online.")
     print(f"Model: {args.model}  |  Workspace: {workspace}")
     print("Type :help for commands or :quit to exit.")
-    greeting = (
-        "Good evening, Sir. All systems are nominal. "
-        "How may I assist you?"
-    )
+    greeting = "Good evening, Sir. All systems are nominal. How may I assist you?"
     print(f"\nJARVIS: {greeting}")
     if speak_answers:
         speak(greeting, voice)
@@ -113,7 +106,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"JARVIS: Workspace is {workspace}, Sir.")
             continue
         if user_text == ":status":
-            # Trigger a natural status request
             user_text = "Give me a quick system status report."
         if user_text.startswith(":speak"):
             speak_answers = user_text.lower().endswith(" on")

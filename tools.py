@@ -10,6 +10,13 @@ from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
 
+from . import desktop as desktop_mod
+
+try:
+    from . import google_native as gnative
+except Exception:  # pragma: no cover
+    gnative = None  # type: ignore
+
 
 MAX_FILE_BYTES = 120_000
 MAX_COMMAND_OUTPUT = 12_000
@@ -54,13 +61,15 @@ class ToolKit:
             "notify": self.notify,
             "set_volume": self.set_volume,
             "open_url": self.open_url,
-            # Desktop control
+            # Desktop
             "activate_app": self.activate_app,
             "frontmost_app": self.frontmost_app,
             "screenshot": self.screenshot,
             "list_windows": self.list_windows,
-            # Google via gog CLI (if installed)
+            "desktop": self.desktop,
+            # Google
             "google": self.google,
+            "google_native": self.google_native,
         }
         tool = tools.get(name)
         if tool is None:
@@ -70,7 +79,7 @@ class ToolKit:
         except Exception as exc:
             return ToolResult(False, f"{type(exc).__name__}: {exc}")
 
-    # ── Core tools ──────────────────────────────────────────────
+    # ── Core ────────────────────────────────────────────────────
 
     def open_app(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
         app_name = str(args.get("name", "")).strip()
@@ -241,10 +250,9 @@ class ToolKit:
             return ToolResult(False, completed.stderr.strip() or f"Could not open {url}.")
         return ToolResult(True, f"Opened {url}.")
 
-    # ── Desktop control ─────────────────────────────────────────
+    # ── Desktop ─────────────────────────────────────────────────
 
     def activate_app(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
-        """Bring an already-running app to the front."""
         name = str(args.get("name", "")).strip()
         if not name:
             return ToolResult(False, "Missing app name.")
@@ -262,12 +270,10 @@ class ToolKit:
         return ToolResult(True, completed.stdout.strip() or "unknown")
 
     def screenshot(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
-        """Capture the screen (or a window) into the workspace."""
         filename = str(args.get("filename", "screenshot.png")).strip() or "screenshot.png"
         if "/" in filename or "\\" in filename:
             filename = Path(filename).name
         dest = self.workspace / filename
-        # -x = no sound, -t png
         completed = subprocess.run(
             ["screencapture", "-x", "-t", "png", str(dest)],
             capture_output=True, text=True, timeout=15,
@@ -277,7 +283,6 @@ class ToolKit:
         return ToolResult(True, f"Screenshot saved to {dest}")
 
     def list_windows(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
-        """List open windows (requires Accessibility permission)."""
         script = '''
 tell application "System Events"
     set winList to {}
@@ -302,54 +307,85 @@ end tell
         raw = completed.stdout.strip()
         if not raw:
             return ToolResult(True, "(no windows found)")
-        # osascript returns comma-separated list
         items = [x.strip() for x in raw.split(",") if x.strip()]
         return ToolResult(True, "\n".join(items[:40]) + ("\n..." if len(items) > 40 else ""))
 
-    # ── Google via gog CLI ──────────────────────────────────────
+    def desktop(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        """Advanced desktop actions: set_window, type, key, click.
 
-    def google(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
-        """Run a gog CLI command for Gmail / Calendar / Drive / Docs / Sheets / Contacts.
-
-        Requires the `gog` binary (https://github.com/teru-0529/gog or brew install).
-        Example args: {"command": "gmail list --unread --limit 5"}
-                      {"command": "calendar list --today"}
-                      {"command": "drive search 'quarterly report'"}
+        These can affect the UI; confirmation is required for type/key/click.
         """
-        if not shutil.which("gog"):
+        action = str(args.get("action", "")).strip().lower()
+        if not action:
             return ToolResult(
                 False,
-                "gog CLI not found. Install it (e.g. `brew install teru-0529/tap/gog` or from GitHub), "
-                "then run `gog auth login` to connect your Google accounts.",
+                "desktop requires 'action'. Supported: set_window, type, key, click.",
+            )
+
+        if action in {"type", "key", "click"}:
+            summary = f"desktop {action} {args}"
+            if not self._ask_permission(summary, why or "Desktop input simulation"):
+                return ToolResult(False, "User denied desktop input action.")
+
+        ok, content = desktop_mod.dispatch(action, args)
+        return ToolResult(ok, content)
+
+    # ── Google ──────────────────────────────────────────────────
+
+    def google(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        """Prefer gog CLI when available."""
+        if not shutil.which("gog"):
+            # Fall through hint toward native
+            return ToolResult(
+                False,
+                "gog CLI not found. Install it, or use the google_native tool after "
+                "pip install -r requirements-optional.txt and placing credentials.json in ~/.jarvis/google/.",
             )
         command = str(args.get("command", "")).strip()
         if not command:
             return ToolResult(
                 False,
                 "Missing gog command. Examples: 'gmail list --unread', 'calendar list --today', "
-                "'drive search report', 'docs list', 'contacts search Alice'.",
+                "'drive search report'.",
             )
-        # Safety: only allow known subcommands
         first = command.split()[0].lower() if command else ""
         allowed = {"gmail", "calendar", "drive", "docs", "sheets", "contacts", "tasks", "auth", "help", "--help"}
         if first not in allowed and not first.startswith("-"):
-            return ToolResult(False, f"Unsupported gog subcommand: {first}. Allowed: {', '.join(sorted(allowed))}")
+            return ToolResult(False, f"Unsupported gog subcommand: {first}.")
 
         full = f"gog {command}"
-        # Google actions that send/modify should ask permission
         mutating = any(kw in command.lower() for kw in ("send", "create", "delete", "update", "upload", "trash", "remove"))
         if mutating and not self._ask_permission(full, why or "Google action that may modify data"):
             return ToolResult(False, "User denied Google action.")
 
-        completed = subprocess.run(
-            full, shell=True, capture_output=True, text=True, timeout=60,
-        )
+        completed = subprocess.run(full, shell=True, capture_output=True, text=True, timeout=60)
         output = "\n".join(p for p in [completed.stdout, completed.stderr] if p).strip()
         if len(output) > MAX_COMMAND_OUTPUT:
             output = output[:MAX_COMMAND_OUTPUT] + "\n...[truncated]"
         if not output:
             output = f"gog exited with code {completed.returncode}"
         return ToolResult(completed.returncode == 0, output)
+
+    def google_native(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        """Native Google API actions (no gog CLI). Requires optional packages + OAuth setup."""
+        if gnative is None or not gnative.available():
+            return ToolResult(
+                False,
+                "Native Google libraries not installed. "
+                "pip install -r requirements-optional.txt then place OAuth credentials at "
+                "~/.jarvis/google/credentials.json",
+            )
+        action = str(args.get("action", "")).strip().lower()
+        if not action:
+            return ToolResult(
+                False,
+                "google_native requires 'action'. Supported: gmail_unread, calendar_today, drive_search.",
+            )
+        try:
+            content = gnative.run_action(action, args)
+            return ToolResult(True, content)
+        except Exception as exc:
+            return ToolResult(False, str(exc))
 
     # ── Helpers ─────────────────────────────────────────────────
 
