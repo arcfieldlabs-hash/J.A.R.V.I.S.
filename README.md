@@ -1,41 +1,41 @@
-# Local Jarvis for macOS
+# J.A.R.V.I.S. — Local Movie-Style Assistant for macOS
 
-This is a starter Jarvis you can run locally on your MacBook Pro from VS Code.
-The AI brain talks to Ollama on your machine, and the assistant can:
+**Just A Rather Very Intelligent System**  
+A private, local AI assistant inspired by the JARVIS of the Iron Man films.  
+Powered by Ollama on your Mac. Witty, formal, British, and useful.
 
-- Chat and answer questions
-- Speak answers with macOS `say`
+## What it can do
+
+- Chat with dry British wit and address you as "Sir"
+- Speak answers using a British macOS voice (`Daniel` by default)
 - Open Mac apps
-- Run shell commands after your approval
-- Search the web when you ask it to
-- Read and write files inside a safe workspace
+- Run shell commands (after your explicit approval)
+- Search the web
+- Read / write / list files inside a safe workspace
+- Report system status (battery, memory, load, disk)
+- Show macOS notifications
+- Set system volume
+- Open URLs in the browser
 
 ## 1. Install Ollama
 
-Install Ollama from [ollama.com](https://ollama.com), then make sure it is running.
-You can start it from the app, or in Terminal:
+Install from [ollama.com](https://ollama.com), then make sure it is running:
 
 ```bash
 ollama serve
 ```
 
-Pull a laptop-friendly starter model:
+Pull a good starter model:
 
 ```bash
 ollama pull llama3.2:3b
 ```
 
-You can use a different local Ollama chat model by setting `JARVIS_MODEL` or passing `--model`.
+You can change the model with `JARVIS_MODEL` or `--model`.
 
-## 2. Open This Folder in VS Code
+## 2. Run Jarvis
 
-```bash
-code /Users/hassanshahid/Documents/Codex/2026-05-25/i-want-to-make-my-very
-```
-
-## 3. Run Jarvis
-
-No third-party Python packages are needed for this first version.
+No third-party Python packages required.
 
 ```bash
 python3 -m venv .venv
@@ -43,152 +43,93 @@ source .venv/bin/activate
 python3 -m jarvis --speak
 ```
 
-Or run the included VS Code launch config named **Jarvis CLI**.
+Or double-click `run_jarvis.command` in Finder.
 
-## Run Without VS Code
+### Useful flags
 
-Double-click this file in Finder:
+| Flag | Purpose |
+|------|---------|
+| `--speak` | Speak replies with macOS `say` |
+| `--voice Daniel` | Choose voice (default is Daniel) |
+| `--model llama3.2:3b` | Select Ollama model |
+| `--workspace ~/Documents` | Safe file workspace |
+| `--once "status"` | One-shot question |
+| `--no-tools` | Disable all tools |
 
-```text
-run_jarvis.command
-```
+Environment variables: `JARVIS_MODEL`, `JARVIS_OLLAMA_URL`, `JARVIS_WORKSPACE`, `JARVIS_VOICE`.
 
-It starts Ollama if needed, creates the Python virtual environment if needed, then launches Jarvis in Terminal.
-
-You can also run it from Terminal:
-
-```bash
-./run_jarvis.command
-```
-
-## Run From Siri With Shortcuts
-
-Create a macOS Shortcut named **Ask Jarvis**:
-
-1. Open the Shortcuts app.
-2. Click **+** to create a new shortcut.
-3. Name it **Ask Jarvis**.
-4. Add **Ask for Input**.
-5. Set the prompt to `What should I ask Jarvis?`.
-6. Add **Run Shell Script**.
-7. Set **Pass Input** to `to stdin`.
-8. Paste this command:
-
-```bash
-cd "/Users/hassanshahid/Documents/Codex/2026-05-25/i-want-to-make-my-very"
-./scripts/jarvis_once.sh
-```
-
-9. Add **Speak Text** and use the shell script result as the text.
-
-Then say:
+## Movie-style examples
 
 ```text
-Hey Siri, Ask Jarvis
-```
-
-Siri launches the shortcut, asks what you want, passes that to your local Jarvis, then reads the answer.
-
-## Say "Hey Jarvis"
-
-On Apple silicon Macs, you can use **Vocal Shortcuts** to trigger Jarvis with your own phrase.
-This does not rename Siri; it teaches macOS to listen for a custom phrase and run an action.
-
-First create the **Ask Jarvis** shortcut from the section above.
-Then:
-
-1. Open **System Settings**.
-2. Go to **Accessibility**.
-3. Go to **Speech**.
-4. Open **Vocal Shortcuts**.
-5. Click **Set Up** or **Add Action**.
-6. Choose **Siri Request**.
-7. Enter `Ask Jarvis`.
-8. Set the phrase to:
-
-```text
-Hey Jarvis
-```
-
-9. Repeat the phrase when macOS asks you to train it.
-10. Turn **Vocal Shortcuts** on.
-
-Now you should be able to say:
-
-```text
-Hey Jarvis
-```
-
-macOS will run the Ask Jarvis shortcut, ask what you want, send that to your local Jarvis, and speak the answer.
-
-If Vocal Shortcuts is not available, use **Voice Control** instead:
-
-1. Go to **System Settings** > **Accessibility** > **Voice Control**.
-2. Turn **Voice Control** on.
-3. Open **Commands**.
-4. Add a custom command named `Hey Jarvis`.
-5. Set the action to **Run Shortcut**.
-6. Choose **Ask Jarvis**.
-
-## Test It
-
-```bash
-python3 -m unittest discover -s tests
-```
-
-## Example Prompts
-
-```text
+Good evening, JARVIS.
+What's the system status?
+Set the volume to 35.
+Notify me that the build finished.
 Open Visual Studio Code.
+Search the web for local-first AI assistants.
+Open https://github.com
 List the files in my workspace.
-Write a file called notes/plan.txt with a 3-step launch plan.
-Search the web for local-first personal assistant projects.
-Run pwd.
+Write a file called notes/plan.txt with a short launch plan.
 ```
 
-## Safety Defaults
+## Siri / "Hey Jarvis"
 
-- Shell commands require your approval before they run.
-- Obvious destructive commands are blocked.
-- File access is limited to the configured workspace.
-- The model runs locally through Ollama at `http://localhost:11434`.
-- Web search only uses the internet when you explicitly ask for a search.
+Create a Shortcut named **Ask Jarvis**:
 
-To change the safe file workspace:
+1. Shortcuts app → New Shortcut
+2. **Ask for Input** → prompt: `What should I ask Jarvis?`
+3. **Run Shell Script** → Pass Input: `to stdin`
+4. Script (adjust the path to your clone):
 
 ```bash
-JARVIS_WORKSPACE="$HOME/Documents" python3 -m jarvis --speak
+cd "/path/to/your/J.A.R.V.I.S."
+./jarvis_once.sh
 ```
 
-To change the model:
+5. **Speak Text** using the script result.
 
-```bash
-JARVIS_MODEL="llama3.2:3b" python3 -m jarvis --speak
-```
+Then say: **Hey Siri, Ask Jarvis**
 
-## Next Upgrades
+For a true wake phrase on Apple silicon:
 
-Good next additions:
+- System Settings → Accessibility → Speech → Vocal Shortcuts
+- Add action → Siri Request → "Ask Jarvis"
+- Phrase: `Hey Jarvis`
 
-- Local speech-to-text with Whisper.cpp, MLX Whisper, or Vosk
-- A wake word such as "Jarvis"
-- A small menu bar app
-- Calendar, reminders, email, and HomeKit tools
-- Per-tool permissions so trusted actions can run faster
+## Safety defaults
+
+- Shell commands always require your confirmation
+- Destructive patterns are blocked
+- File access is sandboxed to the configured workspace
+- Model runs fully locally via Ollama
+- Web access only when you explicitly ask for a search
+
+## Next upgrades (ideas)
+
+- Local speech-to-text (Whisper / MLX Whisper / Vosk)
+- True continuous wake-word listening
+- Menu-bar companion app
+- Calendar, Reminders, Mail, HomeKit tools
+- Per-tool trusted permissions
+- Persistent memory / user preferences
 
 ## Troubleshooting
 
-If you see `Could not reach Ollama`, start Ollama and try again:
-
+**Could not reach Ollama**
 ```bash
 ollama serve
 ```
 
-If Ollama says the model is missing:
-
+**Model missing**
 ```bash
 ollama pull llama3.2:3b
 ```
 
-If the `ollama` command crashes with a Metal or MLX error, try it from a normal Terminal window first.
-If it still crashes there, update or reinstall Ollama before running Jarvis.
+**Voice not found**  
+List available voices: `say -v '?'`  
+Then run with `--voice "Alex"` or set `JARVIS_VOICE`.
+
+---
+
+*"Sometimes you gotta run before you can walk."* — Tony Stark  
+Now go build something brilliant, Sir.
