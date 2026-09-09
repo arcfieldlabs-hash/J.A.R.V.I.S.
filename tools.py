@@ -49,6 +49,10 @@ class ToolKit:
             "read_file": self.read_file,
             "write_file": self.write_file,
             "list_files": self.list_files,
+            "system_status": self.system_status,
+            "notify": self.notify,
+            "set_volume": self.set_volume,
+            "open_url": self.open_url,
         }
         tool = tools.get(name)
         if tool is None:
@@ -169,6 +173,110 @@ class ToolKit:
                 break
         return ToolResult(True, "\n".join(entries) or "(empty)")
 
+    def system_status(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        """Gather a concise system status report for the Mac."""
+        parts: list[str] = []
+
+        # Battery
+        try:
+            batt = subprocess.run(
+                ["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5
+            )
+            if batt.returncode == 0:
+                lines = [ln.strip() for ln in batt.stdout.splitlines() if ln.strip()]
+                parts.append("Battery: " + (" | ".join(lines[-2:]) if lines else "unknown"))
+        except Exception:
+            parts.append("Battery: unavailable")
+
+        # Memory pressure / free
+        try:
+            mem = subprocess.run(
+                ["memory_pressure"], capture_output=True, text=True, timeout=5
+            )
+            if mem.returncode == 0:
+                for line in mem.stdout.splitlines():
+                    if "System-wide memory free percentage" in line or "Pages free" in line:
+                        parts.append(line.strip())
+                        break
+                else:
+                    parts.append("Memory: " + mem.stdout.strip()[:120])
+        except Exception:
+            try:
+                vm = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
+                if vm.returncode == 0:
+                    parts.append("Memory (vm_stat summary available)")
+            except Exception:
+                parts.append("Memory: unavailable")
+
+        # CPU load
+        try:
+            load = subprocess.run(["uptime"], capture_output=True, text=True, timeout=5)
+            if load.returncode == 0:
+                parts.append("Load: " + load.stdout.strip())
+        except Exception:
+            parts.append("Load: unavailable")
+
+        # Disk space for root / home
+        try:
+            df = subprocess.run(
+                ["df", "-h", "/"], capture_output=True, text=True, timeout=5
+            )
+            if df.returncode == 0:
+                lines = df.stdout.strip().splitlines()
+                if len(lines) >= 2:
+                    parts.append("Disk (/): " + lines[1])
+        except Exception:
+            parts.append("Disk: unavailable")
+
+        if not parts:
+            return ToolResult(False, "Could not gather system status.")
+        return ToolResult(True, "\n".join(parts))
+
+    def notify(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        title = str(args.get("title", "JARVIS")).strip() or "JARVIS"
+        message = str(args.get("message", "")).strip()
+        if not message:
+            return ToolResult(False, "Missing notification message.")
+
+        # Escape for AppleScript
+        title_esc = title.replace('\\', '\\\\').replace('"', '\\"')
+        msg_esc = message.replace('\\', '\\\\').replace('"', '\\"')
+        script = f'display notification "{msg_esc}" with title "{title_esc}"'
+        completed = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=10
+        )
+        if completed.returncode != 0:
+            return ToolResult(False, completed.stderr.strip() or "Notification failed.")
+        return ToolResult(True, f"Notification shown: {title} — {message}")
+
+    def set_volume(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        try:
+            level = int(args.get("level", 50))
+        except (TypeError, ValueError):
+            return ToolResult(False, "Volume level must be an integer 0-100.")
+        level = max(0, min(100, level))
+
+        # macOS volume is 0-100 via osascript
+        script = f"set volume output volume {level}"
+        completed = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=5
+        )
+        if completed.returncode != 0:
+            return ToolResult(False, completed.stderr.strip() or "Could not set volume.")
+        return ToolResult(True, f"System volume set to {level}%.")
+
+    def open_url(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        url = str(args.get("url", "")).strip()
+        if not url:
+            return ToolResult(False, "Missing URL.")
+        if not url.startswith(("http://", "https://", "file://")):
+            url = "https://" + url
+
+        completed = subprocess.run(["open", url], capture_output=True, text=True)
+        if completed.returncode != 0:
+            return ToolResult(False, completed.stderr.strip() or f"Could not open {url}.")
+        return ToolResult(True, f"Opened {url}.")
+
     def _safe_path(self, user_path: str) -> Path | None:
         if not user_path:
             return None
@@ -186,7 +294,7 @@ class ToolKit:
         return any(re.search(pattern, lowered) for pattern in DANGEROUS_COMMAND_PATTERNS)
 
     def _ask_permission(self, command: str, why: str) -> bool:
-        print("\nJARVIS wants permission to run a command:")
+        print("\nJARVIS requires your authorisation to run a command:")
         if why:
             print(f"Reason: {why}")
         print(f"Command: {command}")
