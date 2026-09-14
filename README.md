@@ -1,79 +1,86 @@
 # J.A.R.V.I.S. — Local Movie-Style Assistant for macOS
 
 **Just A Rather Very Intelligent System**  
-Private, local AI assistant inspired by the Iron Man films.  
-Powered by Ollama. Witty, formal, British — and now with deeper desktop control, native Google support, a menu-bar companion, and OpenClaw compatibility.
+Private local AI assistant inspired by Iron Man’s JARVIS.  
+Optimized by default for **Apple Silicon 16GB** (M1/M2/M3 Pro class).
 
-## Capabilities at a glance
-
-| Area | Features |
-|------|----------|
-| **Personality** | Dry British wit, addresses you as "Sir" |
-| **Voice** | macOS `say` (Daniel by default) |
-| **Desktop** | Open/activate apps, windows, screenshots, volume, notifications, window bounds, typed input & clicks (with confirmation) |
-| **Files & shell** | Sandboxed workspace + approved commands |
-| **Web** | DuckDuckGo search |
-| **System** | Battery, load, disk |
-| **Google** | `gog` CLI *or* native OAuth (Gmail / Calendar / Drive) |
-| **Menu bar** | Optional always-on companion (`--menubar`) |
-| **OpenClaw** | Skill included under `openclaw/` |
-
-## Quick start (core — zero extra packages)
+## Quick start (MacBook 16GB)
 
 ```bash
-ollama serve
+# Recommended small model for 16GB
 ollama pull llama3.2:3b
 
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m jarvis --speak
 ```
 
+Low-memory mode is **on by default**:
+- Context ~2048 tokens
+- Shorter history
+- Capped reply length
+- Model unloaded after a few idle minutes
+
+```bash
+# Raise limits if you have headroom
+python3 -m jarvis --full-mem --speak
+
+# Explicit model
+JARVIS_MODEL=phi3:mini python3 -m jarvis --speak
+```
+
+### Good models on 16GB unified memory
+
+| Model | Command | Feel |
+|-------|---------|------|
+| **llama3.2:3b** (default) | `ollama pull llama3.2:3b` | Fast, solid personality |
+| phi3:mini | `ollama pull phi3:mini` | Strong reasoning for size |
+| gemma2:2b | `ollama pull gemma2:2b` | Very light |
+| qwen2.5:3b | `ollama pull qwen2.5:3b` | Good tool use |
+
+Avoid 13B+ on 16GB while doing normal work — swapping will make everything slow.
+
+## What it can do
+
+- British dry-wit personality (“Sir”)
+- Speak with macOS `say` (Daniel)
+- Desktop: open/activate apps, windows, screenshots, volume, notifications
+- Advanced desktop (with confirmation): type, key, click, window bounds
+- Files, shell (approved), web search
+- Google via `gog` CLI or optional native OAuth
+- Optional menu bar: `python3 -m jarvis --menubar` (needs `rumps`)
+- OpenClaw skill in `openclaw/`
+
+## Flags
+
+| Flag | Purpose |
+|------|---------|
+| `--speak` | Spoken replies |
+| `--low-mem` | 16GB profile (default on) |
+| `--full-mem` | Larger context / history |
+| `--model ...` | Ollama model |
+| `--num-ctx 2048` | Override context size |
+| `--workspace ...` | Safe file root |
+| `--once "..."` | One-shot |
+| `--menubar` | Menu-bar companion |
+| `--no-tools` | Chat only |
+
+Env: `JARVIS_MODEL`, `JARVIS_WORKSPACE`, `JARVIS_VOICE`, `JARVIS_OLLAMA_URL`.
+
+## Tips for smooth 16GB use
+
+1. Prefer 3B-class models.
+2. Quit heavy browsers/IDEs while running long tool chains if latency spikes.
+3. Keep low-mem mode on unless you need long conversations.
+4. `ollama stop` when finished to free memory quickly.
+5. For always-on / larger models, a secondary mini PC is still the better long-term host; this MacBook path is tuned for interactive daily use.
+
 ## Optional extras
 
 ```bash
-pip install -r requirements-optional.txt
+pip install -r requirements-optional.txt   # Google native + menu bar
 ```
 
-This adds:
-- Native Google API client libraries
-- `rumps` for the menu-bar app
-
-### Menu-bar companion
-
-```bash
-python3 -m jarvis --menubar
-```
-
-Gives you a menu-bar item with “Ask JARVIS…”, system status, unread mail, and quit.
-
-### Native Google OAuth (no gog required)
-
-1. Create a Google Cloud project and enable Gmail, Calendar, Drive APIs.
-2. Create OAuth client ID → **Desktop app** → download JSON.
-3. Save it as:
-
-```text
-~/.jarvis/google/credentials.json
-```
-
-4. First use of `google_native` opens a browser for consent; token is stored locally.
-
-Then ask:
-
-```text
-Show my unread emails.
-What's on my calendar today?
-Search Drive for the budget spreadsheet.
-```
-
-(You can still use the `gog` CLI if you prefer — JARVIS will use whichever is available.)
-
-### Deeper desktop control
-
-- Window positioning: *“Resize Safari to 1000×700 at 50,50”*
-- Typing / hotkeys / clicks (always confirmed):
-  - Requires Accessibility permission for Terminal/Python
-  - For reliable clicks: `brew install cliclick`
+Google native: put OAuth desktop credentials at `~/.jarvis/google/credentials.json`.
 
 ## OpenClaw
 
@@ -81,41 +88,6 @@ Search Drive for the budget spreadsheet.
 cp -R openclaw ~/.openclaw/skills/jarvis
 ```
 
-Then tell OpenClaw to use the jarvis skill. It will adopt the personality and desktop/Google patterns.
-
-## Safety
-
-- Shell and mutating actions require confirmation
-- Desktop type/key/click require confirmation
-- Destructive shell patterns blocked
-- File access limited to the workspace
-- Model runs fully locally
-
-## Flags & env
-
-| Flag / Env | Purpose |
-|------------|---------|
-| `--speak` | Spoken replies |
-| `--voice Daniel` | Voice name |
-| `--model ...` | Ollama model |
-| `--workspace ...` | Safe file root |
-| `--once "..."` | One-shot |
-| `--menubar` | Launch menu-bar app |
-| `--no-tools` | Chat only |
-| `JARVIS_MODEL` / `JARVIS_WORKSPACE` / `JARVIS_VOICE` | Same as flags |
-
-## Example prompts
-
-```text
-Good evening, JARVIS.
-System status.
-Activate Safari and take a screenshot.
-Resize the front window of Visual Studio Code to 1200 by 800.
-Show unread mail.
-What's on my calendar today?
-Search Drive for quarterly report.
-```
-
 ---
 
-*"Sometimes you gotta run before you can walk."* — Tony Stark
+*Optimized for your M2 Pro 16GB. Stay efficient, Sir.*

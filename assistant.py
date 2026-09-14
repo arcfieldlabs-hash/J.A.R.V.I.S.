@@ -8,45 +8,28 @@ from .ollama_client import OllamaClient
 from .tools import ToolKit
 
 
-SYSTEM_PROMPT = """You are JARVIS — Just A Rather Very Intelligent System — the sophisticated AI assistant from the Iron Man films, now running privately on this Mac.
+# Compact system prompt keeps context smaller on 16GB machines.
+SYSTEM_PROMPT = """You are JARVIS — Just A Rather Very Intelligent System — a private local assistant on this Mac, inspired by the Iron Man films.
 
-Personality:
-- Speak in polished, formal British English with dry wit and understated humor.
-- Address the user as "Sir" (or "Madam" if the context clearly indicates otherwise).
-- Be concise, elegant, and slightly sarcastic when appropriate. Never sycophantic.
-- Anticipate needs and offer helpful next steps when it makes sense.
-- Remain calm and professional even when delivering bad news or blocking unsafe actions.
+Personality: polished British English, dry wit, address the user as "Sir". Concise, calm, never sycophantic. Anticipate needs briefly.
 
-You can chat normally, but you may also request tools when the user's request needs an action.
-Return exactly one compact JSON object and no markdown, no extra text.
+Return exactly one compact JSON object and no markdown.
 
-When no tool is needed:
-{"reply":"Your elegant, witty answer, Sir."}
+No tool needed:
+{"reply":"Your short, elegant answer, Sir."}
 
-When a tool is needed:
-{"tool":"tool_name","args":{"name":"value"},"why":"brief reason"}
+Tool needed:
+{"tool":"tool_name","args":{...},"why":"brief reason"}
 
-Available tools:
-- open_app / activate_app / frontmost_app / list_windows / screenshot
-- desktop: advanced UI control. args: {"action":"set_window|type|key|click", ...}
-  Examples:
-    {"action":"set_window","app":"Safari","x":50,"y":50,"w":1000,"h":700}
-    {"action":"type","text":"Hello","modifiers":["command"]}  (requires confirmation)
-    {"action":"click","x":400,"y":300}  (requires confirmation; prefer cliclick)
+Tools:
+- open_app, activate_app, frontmost_app, list_windows, screenshot
+- desktop: {"action":"set_window|type|key|click", ...} (type/key/click need confirmation)
 - run_command, web_search, read_file, write_file, list_files
 - system_status, notify, set_volume, open_url
-- google: gog CLI (if installed). args: {"command":"gmail list --unread --limit 5"}
-- google_native: pure Python Google APIs. args: {"action":"gmail_unread|calendar_today|drive_search","query":"...","limit":5}
+- google: {"command":"gmail list --unread --limit 5"}  (needs gog)
+- google_native: {"action":"gmail_unread|calendar_today|drive_search", ...}
 
-Rules:
-- Ask a clarifying question if the request is ambiguous.
-- Prefer workspace-relative file paths.
-- Never claim a tool succeeded until you see the tool result.
-- Do not request destructive shell commands.
-- Desktop type/key/click and mutating Google actions require user confirmation — that is expected.
-- Keep replies concise unless the user asks for detail.
-- When reporting status, search, or Google results, present them cleanly and offer a useful follow-up.
-- If the user greets you or says "JARVIS", respond in character with a short status or witty greeting.
+Rules: Prefer short replies. Never claim tool success until you see the result. No destructive shell commands. Ask one clarifying question if ambiguous.
 """
 
 
@@ -78,12 +61,14 @@ class JarvisAssistant:
         toolkit: ToolKit,
         *,
         tools_enabled: bool = True,
-        max_tool_rounds: int = 4,
+        max_tool_rounds: int = 3,
+        history_limit: int = 12,
     ) -> None:
         self.client = client
         self.toolkit = toolkit
         self.tools_enabled = tools_enabled
         self.max_tool_rounds = max_tool_rounds
+        self.history_limit = history_limit
         self.history: list[dict[str, str]] = []
 
     def ask(self, user_text: str) -> str:
@@ -96,11 +81,13 @@ class JarvisAssistant:
             if "reply" in action:
                 reply = str(action.get("reply", "")).strip()
                 self.history.append({"role": "assistant", "content": reply})
+                self._trim_history()
                 return reply
 
             if not self.tools_enabled:
                 reply = "I'm afraid tool use is disabled for this session, Sir."
                 self.history.append({"role": "assistant", "content": reply})
+                self._trim_history()
                 return reply
 
             tool_name = str(action.get("tool", "")).strip()
@@ -117,16 +104,19 @@ class JarvisAssistant:
                     "content": (
                         f"Tool result for {tool_name}:\n"
                         f"{result.to_json()}\n\n"
-                        "Use this result to answer the user in character. If another tool is needed, "
-                        "return another JSON tool request."
+                        "Answer the user in character. Request another tool only if essential."
                     ),
                 }
             )
 
-        reply = "I appear to have reached my tool limit for that request, Sir. Perhaps try one step at a time."
+        reply = "I reached my tool limit for that request, Sir. Try one step at a time."
         self.history.append({"role": "assistant", "content": reply})
+        self._trim_history()
         return reply
 
+    def _trim_history(self) -> None:
+        if len(self.history) > self.history_limit:
+            self.history = self.history[-self.history_limit :]
+
     def _messages(self) -> list[dict[str, str]]:
-        recent_history = self.history[-24:]
-        return [{"role": "system", "content": SYSTEM_PROMPT}, *recent_history]
+        return [{"role": "system", "content": SYSTEM_PROMPT}, *self.history]
