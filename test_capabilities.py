@@ -18,7 +18,7 @@ class FakeClient:
         self.num_ctx = num_ctx
         self.messages = []
 
-    def chat(self, messages):
+    def chat(self, messages, *, reply_only=False):
         self.messages.append([dict(message) for message in messages])
         if not self.replies:
             raise AssertionError("Assistant requested an unexpected model round")
@@ -110,7 +110,8 @@ class CapabilitiesTests(unittest.TestCase):
         )
         with patch.object(self.toolkit, "execute", wraps=self.toolkit.execute) as execute:
             reply = assistant.ask("Calculate two plus two.")
-        self.assertIn("tool limit", reply)
+        self.assertIn("calculate: 4", reply)
+        self.assertNotIn("tool limit", reply)
         self.assertEqual(execute.call_count, 1)
         self.assertEqual(len(client.messages), 2)
         self.assertEqual(self.toolkit.memory.recall(), [])

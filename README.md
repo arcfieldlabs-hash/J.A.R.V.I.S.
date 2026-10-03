@@ -141,6 +141,8 @@ Navigate the browser to https://example.com and read the page.
 
 The terminal also supports `:memory [query]`, `:remember a fact`, `:forget ID`, `:reminders`, and `:jobs` without a model call. Reminders require an unambiguous date/time; Jarvis's tool uses timezone-aware ISO8601 timestamps. Reminders are delivered once while the process runs, including overdue reminders after a restart. Research runs in one background worker, collects up to four web-page excerpts, and saves source-linked Markdown under `<workspace>/research/`. Jobs are tracked during the current session; saved reports remain after exit. Pending jobs are cancelled on shutdown, and an active fetch may finish before Python exits. Keep an interactive or web session running for background work.
 
+Tool calls are bounded per request. Repeated identical actions are stopped, and the final model round accepts an answer only. If the model cannot finish its explanation, Jarvis reports the confirmed tool results, including any completed writes or other actions. Tool exchanges stay within the current request; later conversation turns receive completed user/reply pairs. Asking to assign research without a topic should prompt for the topic. Reading Jarvis's source does not automatically add new tools; extensions require code changes, approval where applicable, and a restart.
+
 ## Install from a fresh clone
 
 ```bash

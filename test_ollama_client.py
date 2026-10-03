@@ -77,6 +77,36 @@ class OllamaClientTests(unittest.TestCase):
         self.assertIn("HTTP 404", str(raised.exception))
         self.assertLess(len(str(raised.exception)), 2200)
 
+    def test_final_chat_constrains_response_to_reply_and_preserves_generation_options(self):
+        messages = [
+            {"role": "system", "content": "Summarize the completed work in a reply."},
+            {"role": "user", "content": "Report what you found."},
+        ]
+        with patch("jarvis.ollama_client.request.urlopen", return_value=self.response('{"reply":"The work is complete."}')) as urlopen:
+            self.assertEqual(self.client.chat(messages, reply_only=True), '{"reply":"The work is complete."}')
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(payload["format"], {
+            "type": "object",
+            "properties": {"reply": {"type": "string"}},
+            "required": ["reply"],
+            "additionalProperties": False,
+        })
+        self.assertEqual(payload["messages"], messages)
+        self.assertEqual(payload["options"], {"temperature": 0.2, "num_ctx": 8192, "num_predict": 1024})
+        self.assertEqual(payload["keep_alive"], "10m")
+        self.assertEqual(payload["model"], "llama3.2:3b")
+        self.assertFalse(payload["stream"])
+        self.assertNotIn("tools", payload)
+
+    def test_reply_only_schema_does_not_change_later_tool_capable_chat(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        with patch("jarvis.ollama_client.request.urlopen", side_effect=[self.response(), self.response()]) as urlopen:
+            self.client.chat(messages, reply_only=True)
+            self.client.chat(messages)
+        first, second = [json.loads(call.args[0].data) for call in urlopen.call_args_list]
+        self.assertIsInstance(first["format"], dict)
+        self.assertEqual(second["format"], "json")
+
     def test_regular_chat_404_does_not_suggest_installing_vision_model(self):
         failure = error.HTTPError("http://127.0.0.1:11434/api/chat", 404, "Not found", {}, io.BytesIO(b"missing model"))
         with patch("jarvis.ollama_client.request.urlopen", side_effect=failure):
