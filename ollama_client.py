@@ -30,7 +30,44 @@ class OllamaClient:
         self.num_predict = num_predict
         self.keep_alive = keep_alive
 
-    def chat(self, messages: list[dict[str, str]], *, reply_only: bool = False) -> str:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        reply_only: bool = False,
+        allowed_tools: tuple[str, ...] | list[str] | None = None,
+    ) -> str:
+        reply_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"reply": {"type": "string"}},
+            "required": ["reply"],
+            "additionalProperties": False,
+        }
+        response_format: str | dict[str, Any] = "json"
+        if reply_only:
+            response_format = reply_schema
+        elif allowed_tools is not None:
+            if not isinstance(allowed_tools, (tuple, list)) or any(
+                not isinstance(name, str) or not name or name != name.strip()
+                for name in allowed_tools
+            ):
+                raise ValueError("Allowed tools must be a list or tuple of nonempty tool names.")
+            tool_names = list(dict.fromkeys(allowed_tools))
+            response_format = {
+                "oneOf": [
+                    reply_schema,
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"type": "string", "enum": tool_names},
+                            "args": {"type": "object"},
+                            "why": {"type": "string"},
+                        },
+                        "required": ["tool", "args"],
+                        "additionalProperties": False,
+                    },
+                ],
+            } if tool_names else reply_schema
         options: dict[str, Any] = {
             "temperature": self.temperature,
         }
@@ -43,12 +80,7 @@ class OllamaClient:
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "format": {
-                "type": "object",
-                "properties": {"reply": {"type": "string"}},
-                "required": ["reply"],
-                "additionalProperties": False,
-            } if reply_only else "json",
+            "format": response_format,
             "options": options,
         }
         if self.keep_alive is not None:

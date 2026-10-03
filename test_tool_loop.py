@@ -17,10 +17,12 @@ class FakeClient:
         self.num_ctx = num_ctx
         self.messages = []
         self.reply_only = []
+        self.allowed_tools = []
 
-    def chat(self, messages, *, reply_only=False):
+    def chat(self, messages, *, reply_only=False, allowed_tools=None):
         self.messages.append([dict(message) for message in messages])
         self.reply_only.append(reply_only)
+        self.allowed_tools.append(allowed_tools)
         if not self.replies:
             raise AssertionError("Assistant requested an unexpected model round")
         reply = self.replies.pop(0)
@@ -30,6 +32,15 @@ class FakeClient:
 
 
 class ToolLoopTests(unittest.TestCase):
+    FALSE_RESEARCH_REPLY = (
+        "I will need to propose a tool for research and develop myself onto this device. "
+        "The recorded tool results indicate that the 'research' tool is unknown. "
+        "I will need to propose a tool such as 'google_native' or 'web_search' to proceed with the task. "
+        "This may take approximately 30 seconds to 1 minute to propose and enable the tool. "
+        "Once enabled, I will begin the research task. Estimated completion time for the research task "
+        "is approximately 2-5 minutes, depending on the scope and complexity of the topics. "
+        "I will notify you once the research task is completed. Please enable the 'google_native' tool to proceed, Sir."
+    )
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -235,6 +246,141 @@ class ToolLoopTests(unittest.TestCase):
                 self.assertEqual(client.reply_only, [True])
                 self.assertEqual(self.toolkit.memory.recent_history(limit=2)[-1]["content"], reply)
                 self.assertFalse((self.workspace / "activity.txt").exists())
+
+    def test_normal_model_rounds_receive_the_live_tool_catalog(self):
+        assistant, client = self.assistant([
+            {"tool": "calculate", "args": {"expression": "2+2"}},
+            {"reply": "4, Sir."},
+        ])
+        self.assertEqual(assistant.ask("Calculate two plus two."), "4, Sir.")
+        for names in client.allowed_tools:
+            self.assertEqual(names, self.toolkit.available_tools)
+            self.assertIn("research", names)
+            self.assertIn("web_search", names)
+
+    def test_quoted_false_research_prerequisite_is_corrected_before_persisting(self):
+        assistant, _ = self.assistant([{"reply": self.FALSE_RESEARCH_REPLY}])
+        with patch.object(self.toolkit, "execute", wraps=self.toolkit.execute) as execute:
+            reply = assistant.ask("Research local voice assistants.")
+        execute.assert_not_called()
+        self.assertIn("Research is built in", reply)
+        self.assertIn("No research job was started", reply)
+        self.assertNotIn("Please enable", reply)
+        self.assertNotIn("2-5 minutes", reply)
+        self.assertEqual(self.toolkit.memory.recent_history()[-1]["content"], reply)
+        self.assertIsNone(self.toolkit._development)
+
+    def test_false_final_research_reply_preserves_a_completed_write(self):
+        assistant, client = self.assistant([
+            self.append("A"), {"reply": self.FALSE_RESEARCH_REPLY},
+        ], max_tool_rounds=1)
+        with patch.object(self.toolkit, "execute", wraps=self.toolkit.execute) as execute:
+            reply = assistant.ask("Append A once, then tell me which research tools you have.")
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual((self.workspace / "activity.txt").read_text(), "A")
+        self.assertIn("Research is built in", reply)
+        self.assertIn("Wrote", reply)
+        self.assertIn("activity.txt", reply)
+        self.assertNotIn("Please enable", reply)
+        self.assertTrue(client.reply_only[-1])
+        self.assertIn("research", client.messages[-1][0]["content"])
+        self.assertIn("no installation, development or Google access required", client.messages[-1][0]["content"])
+
+    def test_duplicate_call_finalization_also_corrects_false_research_claim(self):
+        action = self.append("A")
+        assistant, _ = self.assistant([action, action, {"reply": self.FALSE_RESEARCH_REPLY}])
+        reply = assistant.ask("Append A once and describe research support.")
+        self.assertEqual((self.workspace / "activity.txt").read_text(), "A")
+        self.assertIn("Research is built in", reply)
+        self.assertIn("Wrote", reply)
+        self.assertNotIn("Please enable", reply)
+
+    def test_unknown_model_tool_name_does_not_reach_dispatch_or_google(self):
+        assistant, client = self.assistant([
+            {"tool": "research.start", "args": {"query": "local voice assistants"}},
+        ])
+        with patch.object(self.toolkit, "execute", wraps=self.toolkit.execute) as execute:
+            reply = assistant.ask("Research local voice assistants.")
+        execute.assert_not_called()
+        self.assertEqual(len(client.messages), 1)
+        self.assertIn("unregistered tool name", reply)
+        self.assertIn("research, web_search", reply)
+        self.assertIn("Google access and code development are not required", reply)
+
+    def test_unknown_tool_after_success_preserves_the_actual_outcome(self):
+        assistant, _ = self.assistant([
+            self.append("A"), {"tool": "invented_research", "args": {}},
+        ])
+        with patch.object(self.toolkit, "execute", wraps=self.toolkit.execute) as execute:
+            reply = assistant.ask("Append A, then research local voice assistants.")
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual((self.workspace / "activity.txt").read_text(), "A")
+        self.assertIn("Wrote", reply)
+        self.assertIn("unregistered tool name", reply)
+
+    def test_old_false_research_reply_is_excluded_from_context_and_retained_in_storage(self):
+        self.toolkit.memory.save_turn("Research a topic.", self.FALSE_RESEARCH_REPLY)
+        assistant, client = self.assistant([{"reply": "What topic would you like researched, Sir?"}])
+        assistant.ask("Can you do research?")
+        context = "\n".join(message["content"] for message in client.messages[0])
+        self.assertNotIn(self.FALSE_RESEARCH_REPLY, context)
+        self.assertEqual(self.toolkit.memory.recent_history()[1]["content"], self.FALSE_RESEARCH_REPLY)
+
+    def test_actual_research_failure_and_google_account_setup_are_not_rewritten(self):
+        replies = [
+            "The research tool returned an unknown research job ID, Sir. Please provide a valid ID.",
+            "Research is available, but the web request timed out, Sir.",
+            "Research is unavailable because the network is offline, Sir.",
+            "The research tool is unavailable after the worker shuts down, Sir.",
+            "The research is missing evidence for that claim, Sir.",
+            "It previously said 'research tool is unknown', but research is now built in, Sir.",
+            "Research is built in. Google Native needs credentials to read your Gmail, Sir.",
+        ]
+        for expected in replies:
+            with self.subTest(reply=expected):
+                assistant, _ = self.assistant([{"reply": expected}])
+                self.assertEqual(assistant.ask("Explain the research or Google result."), expected)
+
+    def test_builtin_research_starts_without_google_or_development_and_keeps_job_result(self):
+        query = "local voice assistants"
+        assistant, client = self.assistant([
+            {"tool": "research", "args": {"action": "start", "query": query}},
+            {"reply": self.FALSE_RESEARCH_REPLY},
+        ], max_tool_rounds=1)
+        with patch.object(self.toolkit, "search_results", return_value=[{"url": "https://example.com/article"}]), \
+             patch("jarvis.research.fetch_page", return_value={"url": "https://example.com/article", "title": "Local assistants", "text": "Source excerpt."}), \
+             patch.object(self.toolkit, "execute", wraps=self.toolkit.execute) as execute:
+            reply = assistant.ask("Research " + query + ".")
+            self.toolkit.research._executor.shutdown(wait=True)
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(execute.call_args.args[0], "research")
+        job = self.toolkit.research.list_jobs()[0]
+        self.assertEqual(job["query"], query)
+        self.assertEqual(job["status"], "completed")
+        self.assertTrue(Path(job["path"]).is_file())
+        self.assertIn("Source excerpt.", Path(job["path"]).read_text())
+        self.assertIn(job["id"], reply)
+        self.assertIn("Research is built in", reply)
+        self.assertNotIn("Please enable", reply)
+        self.assertNotIn("2-5 minutes", reply)
+        self.assertFalse(self.toolkit.development.enabled)
+        self.assertIn("research", client.messages[-1][0]["content"])
+
+    def test_research_registry_facts_fit_small_context_with_long_saved_memory(self):
+        actions = []
+        for index in range(3):
+            path = self.workspace / f"source{index}.txt"
+            path.write_text(f"SOURCE_{index}\n" + "x" * 5000)
+            actions.append({"tool": "read_file", "args": {"path": path.name}})
+        assistant, client = self.assistant(actions + [{"reply": "Compared the sources, Sir."}])
+        with patch.object(self.toolkit.memory, "recall", return_value=[{"text": "F" * 5000}]):
+            assistant.ask("Compare these sources. " + "G" * 6000)
+        for messages in client.messages:
+            self.assertLessEqual(sum(len(message["content"]) for message in messages), 2048 * 3)
+            self.assertTrue(any(message["content"].startswith("Compare these sources.") for message in messages))
+        evidence = json.loads(client.messages[-1][-1]["content"].partition("\n")[2])
+        self.assertEqual(len(evidence), 3)
+        self.assertTrue(all(result["ok"] for result in evidence))
 
 
 if __name__ == "__main__":

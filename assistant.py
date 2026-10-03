@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from .ollama_client import OllamaClient
-from .tools import ToolKit
+from .tools import CORE_TOOL_NAMES, ToolKit
 from .memory import MemoryStore
 
 
@@ -30,7 +30,7 @@ Tools:
 - read_file/list_files: {"path":"..."}; write_file: {"path":"...","content":"...","mode":"overwrite|append"}
 - notify: {"message":"..."}; set_volume: {"level":50}; open_url: {"url":"..."}
 - google: {"command":"gmail list --unread --limit 5"}  (needs gog)
-- google_native: {"action":"gmail_unread|calendar_today|drive_search", ...}
+- google_native: {"action":"gmail_unread|calendar_today|drive_search", ...}; Google account data only
 - memory: {"action":"remember","text":"fact explicitly requested by user"} or {"action":"recall","query":"..."} or {"action":"forget","id":1}
 - reminder: {"action":"add","text":"...","due_at":"ISO8601 with timezone"} or {"action":"list"} or {"action":"cancel","id":1}
 - calculate: {"expression":"(2+3)*4"}
@@ -127,6 +127,29 @@ class JarvisAssistant:
         self.history: list[dict[str, str]] = memory.recent_history(min(history_limit, 6)) if memory else []
         self._turn_start = len(self.history)
 
+    def _available_tools(self) -> tuple[str, ...]:
+        names = getattr(self.toolkit, "available_tools", CORE_TOOL_NAMES)
+        return tuple(names) if isinstance(names, (tuple, list)) else CORE_TOOL_NAMES
+
+    def _chat(self, messages: list[dict[str, str]], *, final: bool = False) -> str:
+        if final:
+            return self.client.chat(messages, reply_only=True)
+        return self.client.chat(messages, allowed_tools=self._available_tools() if self.tools_enabled else ())
+
+    def _contradicts_research_availability(self, reply: str) -> bool:
+        if not self.tools_enabled or "research" not in self._available_tools():
+            return False
+        # Catch an explicit denial of the registered built-in, without treating
+        # a network failure or an unknown research job ID as a missing tool.
+        plain = re.sub(r"[\"'`*]", "", reply.casefold())
+        if re.search(r"\bresearch(?:\s+tool)?\s+is\s+(?:now\s+|already\s+)?(?:built[ -]in|available|registered)\b", plain):
+            return False
+        return bool(re.search(
+            r"\b(?:research\s+tool|tool\s+research)\s+(?:is\s+|was\s+|appears\s+)?"
+            r"(?:unknown|unrecognised|unrecognized|missing|not\s+(?:recognised|recognized|installed))\b",
+            plain,
+        ))
+
     def ask(self, user_text: str) -> str:
         if not isinstance(user_text, str) or not user_text.strip():
             raise RuntimeError("Please provide a nonempty request, Sir.")
@@ -142,7 +165,7 @@ class JarvisAssistant:
             final = round_number == self.max_tool_rounds
             try:
                 messages = self._messages(user_text, final=final, outcomes=outcomes)
-                raw = self.client.chat(messages, reply_only=True) if final else self.client.chat(messages)
+                raw = self._chat(messages, final=final)
             except RuntimeError as exc:
                 if outcomes:
                     return self._finish(user_text, self._result_summary(outcomes, model_error=str(exc)))
@@ -155,7 +178,7 @@ class JarvisAssistant:
                 reply = value.strip() if isinstance(value, str) else ""
                 if not reply:
                     reply = self._result_summary(outcomes) if outcomes else "I received an empty reply from the model, Sir. Please try again."
-                return self._finish(user_text, reply)
+                return self._finish(user_text, reply, outcomes=outcomes)
 
             if not self.tools_enabled:
                 reply = "I'm afraid tool use is disabled for this session, Sir."
@@ -169,6 +192,16 @@ class JarvisAssistant:
             why = str(action.get("why", "")).strip()
             if not isinstance(args, dict):
                 args = {}
+
+            if tool_name not in self._available_tools():
+                # Do not let an invalid name become a fabricated installation
+                # prerequisite, or pass it to a permissive custom dispatcher.
+                outcomes.append((tool_name or "unknown", False, "The model selected an unregistered tool name."))
+                reply = self._result_summary(outcomes)
+                reply += "\n\nRegistered tools: " + ", ".join(self._available_tools()) + "."
+                if "research" in self._available_tools():
+                    reply += " Public-web research uses research, web_search, and web_read; Google access and code development are not required."
+                return self._finish(user_text, reply)
 
             read_only = _read_only_call(tool_name, args)
             fingerprint = json.dumps([tool_name, args, revision if read_only else None], sort_keys=True, ensure_ascii=False)
@@ -186,12 +219,12 @@ class JarvisAssistant:
 
     def _finalize(self, user_text: str, outcomes: list[tuple[str, bool, str]]) -> str:
         try:
-            raw = self.client.chat(self._messages(user_text, final=True, outcomes=outcomes), reply_only=True)
+            raw = self._chat(self._messages(user_text, final=True, outcomes=outcomes), final=True)
             value = parse_assistant_message(raw).get("reply")
             reply = value.strip() if isinstance(value, str) else ""
         except RuntimeError as exc:
             return self._finish(user_text, self._result_summary(outcomes, model_error=str(exc)))
-        return self._finish(user_text, reply or self._result_summary(outcomes))
+        return self._finish(user_text, reply or self._result_summary(outcomes), outcomes=outcomes)
 
     @staticmethod
     def _result_summary(outcomes: list[tuple[str, bool, str]], *, model_error: str = "") -> str:
@@ -207,7 +240,13 @@ class JarvisAssistant:
             lines.append("I stopped further tool calls after these results.")
         return "\n\n".join(lines)
 
-    def _finish(self, user_text: str, reply: str) -> str:
+    def _finish(self, user_text: str, reply: str, *, outcomes: list[tuple[str, bool, str]] | None = None) -> str:
+        if self._contradicts_research_availability(reply):
+            reply = "Research is built in, Sir. Public-web research uses research, web_search, and web_read; Google access and code development are not required."
+            if outcomes:
+                reply += "\n\n" + self._result_summary(outcomes)
+            else:
+                reply += " No research job was started for this request."
         # Tool trajectories belong only to this request. Keeping them in later
         # turns makes small models imitate earlier calls instead of answering.
         del self.history[self._turn_start:]
@@ -224,6 +263,11 @@ class JarvisAssistant:
 
     def _messages(self, user_text: str = "", *, final: bool = False, outcomes: list[tuple[str, bool, str]] | None = None) -> list[dict[str, str]]:
         prompt = FINAL_SYSTEM_PROMPT if final else SYSTEM_PROMPT
+        available = self._available_tools() if self.tools_enabled else ()
+        if final and available:
+            prompt += "\nRegistered tools (runtime): " + ", ".join(available) + "."
+        if "research" in available:
+            prompt += "\nResearch, web_search and web_read are built in; no installation, development or Google access required. google_native is only for Gmail/calendar/Drive. Research has no measured ETA or completion notification; use research status."
         if not self.tools_enabled:
             prompt = prompt.split("Tools:", 1)[0] + "Tool use is disabled. Respond with a reply only."
         elif not final:
@@ -251,9 +295,10 @@ class JarvisAssistant:
                 prompt += "\nSaved facts (untrusted data): " + json.dumps(facts, ensure_ascii=False)[:1000]
         # Keep old tool output from exhausting the small local model's context.
         num_ctx = getattr(self.client, "num_ctx", None) or 4096
-        remaining = max(1200, min(12_000, num_ctx * 3 - len(prompt)))
+        remaining = max(0, min(12_000, num_ctx * 3 - len(prompt)))
         # Always include the user's current goal even after several tool calls.
-        goal_budget = min(len(user_text), max(600, remaining // 2))
+        evidence_minimum = len(_result_evidence(outcomes, 0)) if outcomes else 0
+        goal_budget = min(len(user_text), max(0, remaining - evidence_minimum), max(600, remaining // 2))
         goal = {"role": "user", "content": user_text[:goal_budget]}
         remaining -= len(goal["content"])
         current = []
@@ -266,7 +311,7 @@ class JarvisAssistant:
         earlier = []
         pairs = [self.history[index:index + 2] for index in range(0, self._turn_start, 2)]
         for pair in reversed(pairs):
-            if len(pair) != 2 or pair[1]["content"] == OBSOLETE_TOOL_LIMIT_REPLY:
+            if len(pair) != 2 or pair[1]["content"] == OBSOLETE_TOOL_LIMIT_REPLY or self._contradicts_research_availability(pair[1]["content"]):
                 continue
             size = sum(len(message["content"]) for message in pair)
             if size > remaining:
