@@ -3,7 +3,7 @@ set -e
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
 
 PROMPT="$*"
@@ -31,4 +31,5 @@ if [ ! -d "$PROJECT_DIR/.venv" ]; then
 fi
 
 source "$PROJECT_DIR/.venv/bin/activate"
+python3 -m pip install -e "$PROJECT_DIR" --quiet
 python3 -m jarvis --once "$PROMPT"

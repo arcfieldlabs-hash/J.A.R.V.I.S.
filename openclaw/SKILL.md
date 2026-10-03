@@ -60,6 +60,18 @@ The user may also run the pure-Python local package:
 python3 -m jarvis --speak
 ```
 
+Install the cloned local package first with `python3 -m pip install -e .`.
+It also offers explicit persistent facts, reminders, arithmetic, public web-page
+reading, and source-linked background research. For local microphone input use
+the optional voice extra and `python3 -m jarvis --listen`; for the orb interface
+use `python3 -m jarvis --web --speak`. Browser automation requires the browser
+extra and Chromium, and clicks/fills require CLI approval. Reminders and research
+need a running Jarvis session. Use `python3 -m jarvis --doctor` for setup checks.
+
+The local assistant stores conversations and explicit facts privately in
+`~/.jarvis` (or `JARVIS_DATA_DIR`). Ask it to remember a fact only when the user
+requests that persistence, and never save credentials or tokens.
+
 You can shell out to it for one-shot questions if desired:
 
 ```bash

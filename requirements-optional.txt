@@ -1,4 +1,5 @@
-# Optional extras for full JARVIS capabilities.
+# Legacy extras for Google and the menu bar.
+# Voice/browser/telemetry use: pip install -e '.[voice,browser,monitor]'
 # Core package still runs with zero third-party dependencies.
 
 # Native Google APIs (Gmail, Calendar, Drive)

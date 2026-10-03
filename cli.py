@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -36,6 +37,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-tools", action="store_true", help="Disable tools.")
     parser.add_argument("--once", help="One-shot question then exit.")
     parser.add_argument("--menubar", action="store_true", help="Optional menu-bar app (needs rumps).")
+    parser.add_argument("--data-dir", default=os.getenv("JARVIS_DATA_DIR", "~/.jarvis"), help="Private memory and reminder storage.")
+    parser.add_argument("--listen", action="store_true", help="Local Whisper microphone input; say the wake word.")
+    parser.add_argument("--wake-word", default="jarvis")
+    parser.add_argument("--stt-model", default="base", help="Local Whisper model (e.g. tiny, base).")
+    parser.add_argument("--web", action="store_true", help="Local orb, chat, and telemetry interface.")
+    parser.add_argument("--port", type=int, default=8765, help="Loopback web interface port.")
+    parser.add_argument("--doctor", action="store_true", help="Report model and optional dependency readiness.")
+    parser.add_argument("--timeout", type=int, default=120, help="Ollama request timeout in seconds.")
     parser.add_argument(
         "--low-mem",
         action="store_true",
@@ -59,10 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
 def speak(text: str, voice: str = DEFAULT_VOICE) -> None:
     try:
         cmd = ["say", "-v", voice, text[:2000]]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
-            subprocess.run(["say", text[:2000]], check=False)
-    except FileNotFoundError:
+            subprocess.run(["say", text[:2000]], check=False, timeout=60)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
 
@@ -75,6 +84,11 @@ Commands:
   :model         Show active model
   :workspace     Show workspace
   :status        Quick system status
+  :memory [text] List/search saved facts
+  :remember ...  Save a fact explicitly
+  :forget ID     Delete a saved fact
+  :reminders     List pending reminders
+  :jobs          List background research jobs
   :quit          Exit
 
 Tips for 16GB MacBook:
@@ -88,6 +102,24 @@ Tips for 16GB MacBook:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if sum(bool(value) for value in (args.web, args.listen, args.once, args.menubar)) > 1:
+        print("Choose one of --web, --listen, --once, or --menubar.", file=sys.stderr)
+        return 2
+    if args.timeout <= 0 or (args.num_ctx is not None and args.num_ctx < 512):
+        print("Use a positive --timeout and --num-ctx of at least 512.", file=sys.stderr)
+        return 2
+    if not 1 <= args.port <= 65535:
+        print("--port must be between 1 and 65535.", file=sys.stderr)
+        return 2
+
+    workspace = Path(args.workspace).expanduser().resolve()
+    data_dir = Path(args.data_dir).expanduser().resolve()
+    if args.doctor:
+        from .diagnostics import diagnose
+        report = diagnose(ollama_url=args.ollama_url, model=args.model, workspace=workspace, data_dir=data_dir)
+        print(json.dumps(report, indent=2))
+        return 0 if report["ollama"].get("ready") and report["ollama"].get("model_installed") else 1
 
     if args.menubar:
         from . import menubar as mb
@@ -107,23 +139,54 @@ def main(argv: list[str] | None = None) -> int:
         num_ctx=num_ctx,
         num_predict=LOWMEM_NUM_PREDICT if low_mem else None,
         keep_alive=LOWMEM_KEEP_ALIVE if low_mem else "10m",
+        timeout=args.timeout,
     )
 
-    workspace = Path(args.workspace).expanduser().resolve()
-    toolkit = ToolKit(workspace=workspace)
+    try:
+        toolkit = ToolKit(workspace=workspace, data_dir=data_dir)
+    except (OSError, ValueError) as exc:
+        print(f"Could not open Jarvis storage: {exc}", file=sys.stderr)
+        return 1
     assistant = JarvisAssistant(
         client,
         toolkit,
         tools_enabled=not args.no_tools,
         max_tool_rounds=LOWMEM_TOOL_ROUNDS if low_mem else 4,
         history_limit=LOWMEM_HISTORY if low_mem else 20,
+        memory=toolkit.memory,
     )
 
     speak_answers = args.speak
     voice = args.voice
 
-    if args.once:
-        return ask_once(assistant, args.once, speak_answers, voice)
+    from .monitoring import SystemMonitor
+
+    def show_reminder(reminder):
+        message = str(reminder["text"])
+        print(f"\nJARVIS reminder: {message}", flush=True)
+        toolkit.execute("notify", {"title": "JARVIS reminder", "message": message})
+
+    monitor = SystemMonitor(workspace, memory=toolkit.memory, on_reminder=show_reminder)
+    try:
+        if args.web:
+            from .web import serve
+            return serve(assistant, toolkit, port=args.port, speak_answers=speak_answers, voice=voice)
+        monitor.start()
+        if args.once:
+            return ask_once(assistant, args.once, speak_answers, voice)
+        if args.listen:
+            return listen_loop(assistant, wake_word=args.wake_word, model=args.stt_model, voice=voice)
+        return interactive_loop(assistant, args, low_mem, speak_answers, voice)
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(f"JARVIS: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        monitor.stop()
+        toolkit.close()
+
+
+def interactive_loop(assistant, args, low_mem, speak_answers, voice) -> int:
+    workspace = assistant.toolkit.workspace
 
     mode = "low-mem" if low_mem else "full"
     print("JARVIS online.")
@@ -167,8 +230,45 @@ def main(argv: list[str] | None = None) -> int:
             speak_answers = user_text.lower().endswith(" on")
             print(f"JARVIS: Spoken answers are {'on' if speak_answers else 'off'}, Sir.")
             continue
+        direct_tool = None
+        if user_text == ":memory" or user_text.startswith(":memory "):
+            direct_tool = ("memory", {"action": "recall", "query": user_text[7:].strip()})
+        elif user_text.startswith(":remember "):
+            direct_tool = ("memory", {"action": "remember", "text": user_text[10:]})
+        elif user_text.startswith(":forget "):
+            try:
+                memory_id = int(user_text[8:])
+            except ValueError:
+                print("JARVIS: Use :forget followed by a numeric memory ID, Sir.")
+                continue
+            direct_tool = ("memory", {"action": "forget", "id": memory_id})
+        elif user_text == ":reminders":
+            direct_tool = ("reminder", {"action": "list"})
+        elif user_text == ":jobs":
+            direct_tool = ("research", {"action": "list"})
+        if direct_tool:
+            result = assistant.toolkit.execute(*direct_tool)
+            print(f"JARVIS: {result.content}")
+            continue
 
         ask_once(assistant, user_text, speak_answers, voice)
+
+
+def listen_loop(assistant, *, wake_word: str, model: str, voice: str) -> int:
+    from .voice import VoiceListener
+    listener = VoiceListener(model=model, wake_word=wake_word)
+    print(f'JARVIS listening. Say "{wake_word}" followed by your request. Ctrl-C to stop.')
+    try:
+        while True:
+            prompt = listener.listen()
+            if prompt is None:
+                continue
+            print(f"You: {prompt}")
+            ask_once(assistant, prompt, True, voice)
+            listener.suspend_after_speech()
+    except KeyboardInterrupt:
+        print("\nJARVIS: Voice input stopped, Sir.")
+        return 0
 
 
 def ask_once(
