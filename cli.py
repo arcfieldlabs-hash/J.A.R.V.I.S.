@@ -39,6 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--full-access", action="store_true",
         help="Allow file tools outside the workspace, subject to macOS permissions; switch off in the web interface.",
     )
+    parser.add_argument(
+        "--self-develop", action="store_true",
+        help="Enable proposing and reviewing Jarvis improvements; testing, applying, and running extensions still require approval.",
+    )
     parser.add_argument("--speak", action="store_true", help="Speak answers with macOS say.")
     parser.add_argument("--voice", default=DEFAULT_VOICE, help="Installed macOS voice (default: best installed Daniel variant).")
     parser.add_argument("--no-tools", action="store_true", help="Disable tools.")
@@ -92,6 +96,8 @@ Commands:
   :model         Show active model
   :workspace     Show workspace
   :access on|off  Allow/restrict file access outside the workspace
+  :develop on|off Enable/disable code development and extension execution
+  :permissions   Show storage and code development permissions
   :status        Quick system status
   :memory [text] List/search saved facts
   :remember ...  Save a fact explicitly
@@ -155,6 +161,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         toolkit = ToolKit(workspace=workspace, data_dir=data_dir, full_disk_access=args.full_access)
+        if args.self_develop:
+            toolkit.development.set_enabled(True)
     except (OSError, ValueError) as exc:
         print(f"Could not open Jarvis storage: {exc}", file=sys.stderr)
         return 1
@@ -246,6 +254,20 @@ def interactive_loop(assistant, args, low_mem, speak_answers, voice) -> int:
             enabled = user_text == ":access on"
             assistant.toolkit.set_full_disk_access(enabled)
             print(f"JARVIS: Storage access is {'all permitted paths' if enabled else 'workspace only'}, Sir.")
+            continue
+        if user_text == ":permissions":
+            toolkit = assistant.toolkit
+            print(f"JARVIS: Storage: {'all permitted paths' if toolkit.full_disk_access else 'workspace only'}; "
+                  f"self-development: {'on' if toolkit.development.enabled else 'off'}. "
+                  "Code testing, applying, and extension execution each require approval, Sir.")
+            continue
+        if user_text.startswith(":develop"):
+            if user_text not in {":develop on", ":develop off"}:
+                print("JARVIS: Use :develop on or :develop off, Sir.")
+                continue
+            enabled = user_text == ":develop on"
+            assistant.toolkit.development.set_enabled(enabled)
+            print(f"JARVIS: Self-development is {'on' if enabled else 'off'}. Code execution still requires approval, Sir.")
             continue
         if user_text == ":status":
             user_text = "Give a brief system status."

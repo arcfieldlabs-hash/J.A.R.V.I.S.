@@ -8,11 +8,12 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .monitoring import SystemMonitor
 from .media import DevicePermissions, MediaError, transcribe_audio, validate_image
 from .speech import MAX_TEXT_CHARACTERS, choose_voice, synthesize, voice_inventory
+from .approvals import ApprovalBroker
 
 
 MAX_BODY_BYTES = 16_384
@@ -50,6 +51,9 @@ class JarvisWebServer(ThreadingHTTPServer):
         toolkit.permission_handler = lambda command, why: False
         self._previous_screen_capture = getattr(toolkit, "screen_capture_allowed", True)
         toolkit.screen_capture_allowed = False
+        self.approvals = ApprovalBroker()
+        self._previous_development_permission = getattr(toolkit, "development_permission_handler", None)
+        toolkit.development_permission_handler = self.approvals.request
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis-turn")
         self._turn_lock = threading.Lock()
         self._busy = False
@@ -64,6 +68,9 @@ class JarvisWebServer(ThreadingHTTPServer):
         self._resource_lock = threading.Lock()
         self._media_jobs: dict[str, tuple[Future, str, int, str]] = {}
         self._speech_jobs: dict[str, Future] = {}
+        self.development_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis-development")
+        self._development_lock = threading.Lock()
+        self._development_jobs: dict[str, Future] = {}
         self.monitor = SystemMonitor(toolkit.workspace, memory=getattr(toolkit, "memory", None))
         self._previous_monitor = getattr(toolkit, "monitor", None)
         toolkit.monitor = self.monitor
@@ -117,7 +124,15 @@ class JarvisWebServer(ThreadingHTTPServer):
         state["controlled_actions"] = "Use the CLI to approve controlled actions."
         state["devices"] = self.devices.snapshot()
         state["settings"] = self.settings_snapshot()
+        state["development"] = self.development_snapshot()
+        state["approvals"] = self.approvals.pending()
         return state
+
+    def development_snapshot(self) -> dict[str, Any]:
+        manager = getattr(self.toolkit, "development", None)
+        if manager is None:
+            return {"enabled": False, "proposals": [], "extensions": []}
+        return {"enabled": manager.enabled, "proposals": manager.list(), "extensions": self.toolkit.extension_catalog()}
 
     def settings_snapshot(self) -> dict[str, Any]:
         client = getattr(self.assistant, "client", None)
@@ -126,11 +141,12 @@ class JarvisWebServer(ThreadingHTTPServer):
             "full_memory": (getattr(client, "num_ctx", None) or 2048) >= 8192,
             "context_tokens": getattr(client, "num_ctx", None) or 2048,
             "vision_model": self.vision_model,
+            "self_development": bool(getattr(getattr(self.toolkit, "development", None), "enabled", False)),
         }
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if not payload or set(payload) - {"full_access", "full_memory"}:
-            raise ValueError("Use full_access and/or full_memory settings.")
+        if not payload or set(payload) - {"full_access", "full_memory", "self_development"}:
+            raise ValueError("Use full_access, full_memory, or self_development settings.")
         if any(type(value) is not bool for value in payload.values()):
             raise ValueError("Settings must be true or false.")
         with self._turn_lock:
@@ -139,12 +155,53 @@ class JarvisWebServer(ThreadingHTTPServer):
                 raise ValueError("Model memory settings are unavailable.")
             if "full_memory" in payload and self._busy:
                 raise RuntimeError("Wait for the current answer before changing model memory.")
+            manager = getattr(self.toolkit, "development", None) if "self_development" in payload else None
+            if "self_development" in payload and manager is None:
+                raise ValueError("Code development is unavailable in this session.")
+            if manager is not None:
+                if not payload["self_development"]:
+                    self.approvals.cancel_all()
+                manager.set_enabled(payload["self_development"])
+                if not payload["self_development"]:
+                    self.approvals.cancel_all()
             if "full_access" in payload:
                 self.toolkit.set_full_disk_access(payload["full_access"])
             if "full_memory" in payload:
                 client.num_ctx = 8192 if payload["full_memory"] else 2048
                 client.num_predict = 1024 if payload["full_memory"] else 256
         return self.settings_snapshot()
+
+    def submit_development_action(self, payload: dict[str, Any]) -> str | None:
+        manager = getattr(self.toolkit, "development", None)
+        if manager is None:
+            raise ValueError("Code development is unavailable in this session.")
+        if payload.get("action") not in ("test", "apply", "rollback"):
+            raise ValueError("Choose test, apply, or rollback for an existing proposal.")
+        if not isinstance(payload.get("id"), str) or len(payload["id"]) > 100:
+            raise ValueError("A proposal ID is required.")
+        with self._development_lock:
+            if self._closed or any(not job.done() for job in self._development_jobs.values()):
+                return None
+            while len(self._development_jobs) >= 4:
+                self._development_jobs.pop(next(iter(self._development_jobs)))
+            request_id = secrets.token_urlsafe(18)
+            self._development_jobs[request_id] = self.development_executor.submit(manager.handle, payload)
+        return request_id
+
+    def development_job_snapshot(self, request_id: str) -> dict[str, Any] | None:
+        with self._development_lock:
+            future = self._development_jobs.get(request_id)
+        if future is None:
+            return None
+        if not future.done():
+            return {"request_id": request_id, "status": "pending"}
+        try:
+            result = future.result()
+            if isinstance(result, dict) and result.get("ok") is False:
+                return {"request_id": request_id, "status": "error", "error": result.get("error") or result.get("content") or json.dumps(result), "result": result}
+            return {"request_id": request_id, "status": "complete", "result": result}
+        except Exception as exc:
+            return {"request_id": request_id, "status": "error", "error": str(exc)}
 
     def submit_media(self, source: str, operation: Any, result_key: str) -> str | None:
         generation = self.devices.ticket(source)
@@ -200,15 +257,18 @@ class JarvisWebServer(ThreadingHTTPServer):
         if self._closed:
             return
         self._closed = True
+        self.approvals.close()
         for source in ("camera", "microphone", "screen"):
             self.devices.set_enabled(source, False)
         self.monitor.stop()
         self.executor.shutdown(wait=True, cancel_futures=False)
         self.media_executor.shutdown(wait=True, cancel_futures=True)
         self.speech_executor.shutdown(wait=True, cancel_futures=True)
+        self.development_executor.shutdown(wait=True, cancel_futures=True)
         self.toolkit.permission_handler = self._previous_permission_handler
         self.toolkit.screen_capture_allowed = self._previous_screen_capture
         self.toolkit.monitor = self._previous_monitor
+        self.toolkit.development_permission_handler = self._previous_development_permission
         super().server_close()
 
 
@@ -269,8 +329,8 @@ class JarvisRequestHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path in {"/", "/index.html"}:
             self._send(200, self.server.page, "text/html; charset=utf-8")
-        elif path == "/devices.js":
-            self._send(200, (Path(__file__).parent / "web" / "devices.js").read_bytes(), "text/javascript; charset=utf-8")
+        elif path in {"/devices.js", "/development.js"}:
+            self._send(200, (Path(__file__).parent / "web" / path[1:]).read_bytes(), "text/javascript; charset=utf-8")
         elif path == "/api/status":
             if self._check_token():
                 self._json(200, self.server.status_snapshot())
@@ -278,6 +338,28 @@ class JarvisRequestHandler(BaseHTTPRequestHandler):
             if self._check_token():
                 snapshot = self.server.job_snapshot(path.removeprefix("/api/chat/"))
                 self._json(200 if snapshot is not None else 404, snapshot or {"error": "Turn not found."})
+        elif path == "/api/approvals":
+            if self._check_token():
+                self._json(200, {"approvals": self.server.approvals.pending()})
+        elif path.startswith("/api/development/"):
+            if self._check_token():
+                try:
+                    manager = getattr(self.server.toolkit, "development", None)
+                    if manager is None:
+                        raise ValueError("Code development is unavailable in this session.")
+                    if path == "/api/development/source":
+                        query = parse_qs(urlsplit(self.path).query)
+                        result = manager.inspect(query.get("path", ["."])[0], int(query.get("line", ["1"])[0]))
+                        self._json(200, result)
+                    elif path.startswith("/api/development/proposals/"):
+                        self._json(200, manager.review(path.removeprefix("/api/development/proposals/")))
+                    elif path.startswith("/api/development/jobs/"):
+                        snapshot = self.server.development_job_snapshot(path.removeprefix("/api/development/jobs/"))
+                        self._json(200 if snapshot is not None else 404, snapshot or {"error": "Development job not found."})
+                    else:
+                        self._json(404, {"error": "Not found."})
+                except (ValueError, OSError) as exc:
+                    self._json(400, {"error": str(exc)})
         elif path == "/api/voices":
             if self._check_token():
                 try:
@@ -312,7 +394,7 @@ class JarvisRequestHandler(BaseHTTPRequestHandler):
         if not self._check_local_request() or not self._check_token():
             return
         path = urlsplit(self.path).path
-        if path not in {"/api/chat", "/api/devices", "/api/perception", "/api/transcribe", "/api/speech", "/api/settings"}:
+        if path not in {"/api/chat", "/api/devices", "/api/perception", "/api/transcribe", "/api/speech", "/api/settings", "/api/development/action"} and not path.startswith("/api/approvals/"):
             self._json(404, {"error": "Not found."})
             return
         if self.headers.get_content_type() != "application/json":
@@ -369,6 +451,20 @@ class JarvisRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/settings":
                 self._json(200, self.server.update_settings(payload))
+                return
+            if path.startswith("/api/approvals/"):
+                if set(payload) != {"approved"}:
+                    raise ValueError("Send only an approved boolean decision.")
+                approval_id = path.removeprefix("/api/approvals/")
+                accepted = self.server.approvals.decide(approval_id, payload["approved"])
+                self._json(200 if accepted else 404, {"accepted": accepted, **({} if accepted else {"error": "Approval expired or was already resolved."})})
+                return
+            if path == "/api/development/action":
+                request_id = self.server.submit_development_action(payload)
+                if request_id is None:
+                    self._json(429, {"error": "A development action is already running. Please wait."})
+                else:
+                    self._json(202, {"request_id": request_id, "status": "pending"})
                 return
             if path == "/api/transcribe":
                 audio = payload.get("audio")

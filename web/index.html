@@ -68,6 +68,7 @@
         <p id="access-note" class="detail">File access follows macOS permissions. Larger context uses more RAM.</p>
       </section>
       <section id="device-panel" aria-label="Camera, microphone and screen controls"></section>
+      <section id="development-panel" aria-label="Code development and approvals"></section>
       <div class="policy">Controlled actions require approval in the CLI. Device controls are separate from display modes.</div>
       <div id="monitor-errors" class="policy" role="status"></div>
     </section>
@@ -92,6 +93,7 @@
   </main>
   <script id="jarvis-config" type="application/json" nonce="__JARVIS_NONCE__">__JARVIS_BOOTSTRAP__</script>
   <script nonce="__JARVIS_NONCE__" src="/devices.js"></script>
+  <script nonce="__JARVIS_NONCE__" src="/development.js"></script>
   <script nonce="__JARVIS_NONCE__">
     'use strict';
     const bootstrap = document.getElementById('jarvis-config').textContent.trim();
@@ -101,7 +103,7 @@
     const $ = id => document.getElementById(id);
     const tokenHeaders = { 'X-Jarvis-Token':config.csrfToken };
     let busy = false, speaking = false, mode = 'workspace', serverBusy = false;
-    let devices = null, speechGeneration = 0, speechAudio = null, speechURL = null;
+    let devices = null, development = null, speechGeneration = 0, speechAudio = null, speechURL = null;
     const seenReminders = new Set();
     $('prompt').maxLength = config.maxPromptChars;
     $('speech').checked = config.speakAnswers;
@@ -208,6 +210,7 @@
       onTranscript:text => { if (busy || serverBusy) { $('prompt').value=text.slice(0,config.maxPromptChars); addMessage('SYSTEM','Transcript ready in the message box.','system'); } else submitChat(text); },
       onAnalysis:reply => { addMessage('JARVIS',reply); speak(reply); }
     });
+    development = window.JarvisDevelopment.mount({container:$('development-panel'),enabled:config.backendEnabled,api,addMessage});
     window.addEventListener('pagehide',stopSpeech);
     function showSettings(state) {
       $('full-access').checked = state.full_access;
@@ -242,6 +245,7 @@
         const state = await api('/api/status');
         $('connection').textContent = 'Local systems connected'; $('connection').classList.add('online');
         serverBusy = state.busy; updateOrbLabel();
+        development.refresh(state);
         if (state.settings && !$('full-access').disabled && !$('full-memory').disabled) showSettings(state.settings);
         setPercent('cpu',state.cpu_percent);
         $('cpu-detail').textContent = state.cpu_percent == null ? 'Collecting CPU sample' : (state.cpu ? state.cpu.physical_cores+' physical / '+state.cpu.logical_cores+' logical cores' : 'Current system utilization');
