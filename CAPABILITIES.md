@@ -16,7 +16,12 @@ The existing assistant runs on macOS with a local Ollama model and macOS speech.
 | Modular architecture | Separate brain, memory, voice, browser, research, monitoring, UI and dispatch modules | Standard-library core; heavier integrations installed as extras. |
 | Diagnostics and recovery | `--doctor`, Ollama JSON output, useful timeout/setup errors, bounded queues, cleanup | No model inference/hardware checks in automated tests. |
 
-The preview mentions ~50 tools and a Flask/Socket.IO backend, Chroma vectors, a Markdown vault, Claude prompt caching, and XTTS cloning. It supplies no implementation detail for them. This update uses the smaller existing stack: SQLite relevance search and a loopback HTTP interface with polling. Voice cloning, XTTS training, camera vision, CAD agents, meeting integration, multi-hour academic research, and production cloud hosting remain future work.
+The preview mentions ~50 tools and a Flask/Socket.IO backend, Chroma vectors, a Markdown vault, Claude prompt caching, and XTTS cloning. It supplies no implementation detail for them. This update uses the smaller existing stack: SQLite relevance search and a loopback HTTP interface with polling. Voice cloning, XTTS training, camera vision, CAD agents, meeting integration, multi-hour academic research, and cloud hosting of the assistant backend remain future work.
+
+Cloudflare can publish the orb as a static interface preview using the repository's
+Wrangler configuration. It shows a link to local Jarvis and does not send chat or
+telemetry requests without the local Python backend. See
+[Cloudflare-deployment.md](Cloudflare-deployment.md) for the build settings.
 
 ## Local operation
 

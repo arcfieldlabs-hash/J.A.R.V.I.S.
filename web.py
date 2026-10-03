@@ -50,6 +50,7 @@ class JarvisWebServer(ThreadingHTTPServer):
         self._closed = False
         self.monitor = SystemMonitor(toolkit.workspace, memory=getattr(toolkit, "memory", None))
         bootstrap = json.dumps({
+            "backendEnabled": True,
             "csrfToken": self.csrf_token,
             "speakAnswers": speak_answers,
             "voice": voice,

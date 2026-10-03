@@ -160,6 +160,14 @@ pip install -r requirements-optional.txt   # Google native + menu bar
 
 Google native: put OAuth desktop credentials at `~/.jarvis/google/credentials.json`.
 
+## Cloudflare deployment
+
+Cloudflare can host the static orb interface as a preview. The repository's
+`wrangler.jsonc` points to `./web`; run `npm ci` and `npm run check` to validate it
+locally. Follow [Cloudflare-deployment.md](Cloudflare-deployment.md) for the exact
+build settings and branch to deploy. Chat, Ollama, memory, telemetry, and desktop
+tools still run in the local Python application on your Mac.
+
 ## Validation
 
 ```bash

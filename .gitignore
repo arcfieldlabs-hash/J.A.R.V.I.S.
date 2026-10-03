@@ -11,3 +11,6 @@ dist/
 .ollama.log
 credentials.json
 token.json
+node_modules/
+.wrangler/
+.dev.vars

@@ -1,4 +1,4 @@
-name: Python checks
+name: Jarvis checks
 
 on:
   push:
@@ -20,3 +20,14 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -e .
       - run: python -m unittest discover -s .
+
+  cloudflare-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run check

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import tempfile
 import threading
 import unittest
@@ -84,6 +85,23 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/../tools.py")[0], 404)
         self.assertEqual(self.request("GET", "/web/index.html")[0], 404)
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
+
+    def test_local_bootstrap_enables_backend_and_safely_serializes_voice(self) -> None:
+        voice = "Sir's </script><script>window.injected=true</script>"
+        toolkit = SimpleNamespace(workspace=Path(self.directory.name), memory=None, permission_handler=None)
+        server = create_server(self.assistant, toolkit, port=0, voice=voice)
+        try:
+            page = server.page.decode("utf-8")
+            match = re.search(r'<script id="jarvis-config"[^>]*>(.*?)</script>', page, re.DOTALL)
+            self.assertIsNotNone(match)
+            config = json.loads(match.group(1))
+            self.assertTrue(config["backendEnabled"])
+            self.assertEqual(config["csrfToken"], server.csrf_token)
+            self.assertEqual(config["voice"], voice)
+            self.assertNotIn(voice, page)
+            self.assertEqual(page.count("<script"), 2)
+        finally:
+            server.server_close()
 
     def test_reject_foreign_host_and_origin_before_tool_use(self) -> None:
         for headers in [{"Host":"attacker.example"},{"Host":f"127.0.0.1:{self.server.server_port}.attacker.example"},{"Origin":"https://attacker.example"},{"Origin":"null"}]:

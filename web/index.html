@@ -8,6 +8,7 @@
   <title>JARVIS · Local command center</title>
   <style>
     :root { color-scheme:dark; --bg:#050b13; --panel:#0a1622; --ink:#d5e9f8; --muted:#8194a6; --blue:#48ccff; --line:#163248; }
+    [hidden] { display:none!important; }
     * { box-sizing:border-box; } body { margin:0; background:radial-gradient(ellipse at 37% 25%,#0a2032 0,transparent 60%),var(--bg); color:var(--ink); font:14px/1.5 system-ui,-apple-system,sans-serif; min-height:100vh; }
     button,input { font:inherit; } button { cursor:pointer; } button:disabled { cursor:wait; opacity:.6; } button:focus-visible,input:focus-visible { outline:2px solid var(--blue); outline-offset:4px; }
     header { padding:25px 4vw; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); gap:18px; flex-wrap:wrap; }
@@ -23,6 +24,10 @@
     @media(max-width:850px) { main { grid-template-columns:1fr; padding-top:8px; } .orb-stage { min-height:350px; } canvas { height:300px; } .conversation { min-height:420px; max-height:600px; } body[data-mode=awake] .orb-stage { min-height:360px; } }
     @media(max-width:450px) { header { padding:18px; } main { padding:10px 18px 24px; } .telemetry { grid-template-columns:repeat(2,minmax(0,1fr)); } nav button { padding:6px 10px; } .value { font-size:21px; } }
     @media(prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none!important; } }
+    .preview-guide p { margin:0 0 12px; color:var(--muted); }
+    .preview-guide code { display:block; padding:12px; background:#06101a; border:1px solid var(--line); border-radius:7px; overflow-wrap:anywhere; font-size:12px; }
+    .preview-guide a { display:inline-block; margin-top:14px; color:#d8f5ff; background:#164961; border:1px solid #2f81a4; border-radius:7px; padding:10px 15px; text-decoration:none; }
+    .preview-guide a:focus-visible { outline:2px solid var(--blue); outline-offset:4px; }
   </style>
 </head>
 <body data-mode="workspace">
@@ -60,15 +65,24 @@
         <div class="message"><span class="speaker">JARVIS</span><p>Good evening, Sir. How may I assist?</p></div>
       </div>
       <div class="composer">
+        <div id="preview-guide" class="preview-guide" hidden>
+          <p>Start Jarvis on your Mac for chat, voice, and live system metrics:</p>
+          <code>python3 -m jarvis --web --speak</code>
+          <a href="http://127.0.0.1:8765" target="_blank" rel="noopener noreferrer">Open local Jarvis</a>
+        </div>
         <form id="chat-form"><input type="text" id="prompt" aria-label="Message to JARVIS" placeholder="Ask JARVIS…" autocomplete="off" required><button id="send" type="submit">Send</button></form>
         <div class="compose-note"><span>Local session · messages sent to your configured model</span><label><input type="checkbox" id="speech">Read answers aloud</label></div>
         <div id="speech-note" class="detail"></div>
       </div>
     </section>
   </main>
+  <script id="jarvis-config" type="application/json" nonce="__JARVIS_NONCE__">__JARVIS_BOOTSTRAP__</script>
   <script nonce="__JARVIS_NONCE__">
     'use strict';
-    const config = __JARVIS_BOOTSTRAP__;
+    const bootstrap = document.getElementById('jarvis-config').textContent.trim();
+    const config = bootstrap.startsWith('{') ? JSON.parse(bootstrap) : {
+      backendEnabled:false, csrfToken:'', speakAnswers:false, voice:'Daniel', maxPromptChars:8000
+    };
     const $ = id => document.getElementById(id);
     const tokenHeaders = { 'X-Jarvis-Token':config.csrfToken };
     let busy = false, speaking = false, mode = 'workspace', serverBusy = false;
@@ -83,6 +97,12 @@
       box.append(label,content); $('messages').append(box); $('messages').scrollTop = $('messages').scrollHeight;
     }
     function updateOrbLabel() {
+      if (!config.backendEnabled) {
+        $('orb-caption').textContent = mode === 'standby' ? 'Standing by.' : 'Orb interface preview';
+        $('orb-note').textContent = 'Open local Jarvis for chat and live telemetry';
+        $('turn-state').textContent = 'Preview';
+        return;
+      }
       $('orb-caption').textContent = speaking ? 'Speaking, Sir.' : busy ? 'One moment, Sir.' : mode === 'standby' ? 'Standing by.' : 'At your service, Sir.';
       $('orb-note').textContent = speaking ? 'Speaking aloud · microphone is off' : busy ? 'Working on your request · microphone is off' : 'Text input ready · microphone is off';
       $('turn-state').textContent = speaking ? 'Speaking' : busy || serverBusy ? 'Working' : 'Ready';
@@ -106,6 +126,7 @@
       window.speechSynthesis.speak(utterance);
     }
     async function api(path, options = {}) {
+      if (!config.backendEnabled) throw new Error('Open local Jarvis to use the assistant.');
       const response = await fetch(path, { ...options, cache:'no-store', headers:{ ...tokenHeaders,...options.headers } });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Local server request failed.');
@@ -113,7 +134,7 @@
     }
     const wait = ms => new Promise(resolve => setTimeout(resolve,ms));
     $('chat-form').addEventListener('submit', async event => {
-      event.preventDefault(); if (busy) return;
+      event.preventDefault(); if (!config.backendEnabled || busy) return;
       const prompt = $('prompt').value.trim(); if (!prompt) return;
       busy = true; $('send').disabled = true; $('prompt').value = ''; updateOrbLabel();
       addMessage('YOU',prompt,'user');
@@ -161,7 +182,25 @@
       } catch (error) { $('connection').textContent = 'Local server unavailable'; $('connection').classList.remove('online'); }
       setTimeout(refreshStatus,5000);
     }
-    refreshStatus();
+    if (config.backendEnabled) {
+      refreshStatus();
+    } else {
+      document.title = 'JARVIS · Orb interface preview';
+      document.querySelector('.brand small').textContent = 'ORB INTERFACE PREVIEW';
+      document.querySelector('.orb-stage .eyebrow').textContent = 'Your assistant runs on your Mac';
+      $('connection').textContent = 'Interface preview';
+      $('preview-guide').hidden = false;
+      $('chat-form').hidden = true;
+      document.querySelector('.compose-note').hidden = true;
+      $('prompt').disabled = $('send').disabled = $('speech').disabled = true;
+      const greeting = $('messages').querySelector('p');
+      greeting.textContent = 'Welcome, Sir. Open Jarvis on your Mac to begin a conversation.';
+      document.querySelector('.policy').textContent = 'This hosted page previews the orb. Your conversations and computer controls stay in local Jarvis.';
+      for (const id of ['cpu-detail','memory-detail','disk-detail','network-detail','sample-time']) {
+        $(id).textContent = 'Available in local Jarvis';
+      }
+      updateOrbLabel();
+    }
     const canvas = $('orb'), ctx = canvas.getContext('2d');
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const particles = Array.from({length:350}, (_,i) => {
