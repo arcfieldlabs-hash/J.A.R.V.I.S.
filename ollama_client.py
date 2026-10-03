@@ -30,7 +30,7 @@ class OllamaClient:
         self.num_predict = num_predict
         self.keep_alive = keep_alive
 
-    def chat(self, messages: list[dict[str, str]]) -> str:
+    def chat(self, messages: list[dict[str, str]], *, reply_only: bool = False) -> str:
         options: dict[str, Any] = {
             "temperature": self.temperature,
         }
@@ -43,7 +43,12 @@ class OllamaClient:
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "format": "json",
+            "format": {
+                "type": "object",
+                "properties": {"reply": {"type": "string"}},
+                "required": ["reply"],
+                "additionalProperties": False,
+            } if reply_only else "json",
             "options": options,
         }
         if self.keep_alive is not None:
