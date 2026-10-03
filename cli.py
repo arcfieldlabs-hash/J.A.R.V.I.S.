@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 from .assistant import JarvisAssistant
 from .ollama_client import OllamaClient
+from .speech import MAX_TEXT_CHARACTERS, SpeechError, speak_text
 from .tools import ToolKit
 
 
@@ -16,6 +16,7 @@ from .tools import ToolKit
 DEFAULT_MODEL = os.getenv("JARVIS_MODEL", "llama3.2:3b")
 DEFAULT_OLLAMA_URL = os.getenv("JARVIS_OLLAMA_URL", "http://localhost:11434")
 DEFAULT_VOICE = os.getenv("JARVIS_VOICE", "Daniel")
+DEFAULT_VISION_MODEL = os.getenv("JARVIS_VISION_MODEL", "moondream")
 
 # Low-memory profile (good default on 16GB unified memory).
 LOWMEM_NUM_CTX = 2048
@@ -23,6 +24,8 @@ LOWMEM_NUM_PREDICT = 256
 LOWMEM_HISTORY = 10
 LOWMEM_TOOL_ROUNDS = 3
 LOWMEM_KEEP_ALIVE = "5m"
+FULLMEM_NUM_CTX = 8192
+FULLMEM_NUM_PREDICT = 1024
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,8 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
     parser.add_argument("--workspace", default=os.getenv("JARVIS_WORKSPACE", os.getcwd()))
+    parser.add_argument(
+        "--full-access", action="store_true",
+        help="Allow file tools outside the workspace, subject to macOS permissions; switch off in the web interface.",
+    )
     parser.add_argument("--speak", action="store_true", help="Speak answers with macOS say.")
-    parser.add_argument("--voice", default=DEFAULT_VOICE, help="say voice (default: Daniel)")
+    parser.add_argument("--voice", default=DEFAULT_VOICE, help="Installed macOS voice (default: best installed Daniel variant).")
     parser.add_argument("--no-tools", action="store_true", help="Disable tools.")
     parser.add_argument("--once", help="One-shot question then exit.")
     parser.add_argument("--menubar", action="store_true", help="Optional menu-bar app (needs rumps).")
@@ -41,6 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--listen", action="store_true", help="Local Whisper microphone input; say the wake word.")
     parser.add_argument("--wake-word", default="jarvis")
     parser.add_argument("--stt-model", default="base", help="Local Whisper model (e.g. tiny, base).")
+    parser.add_argument(
+        "--vision-model", default=DEFAULT_VISION_MODEL,
+        help="Local Ollama image model for enabled camera/screens (default: moondream).",
+    )
     parser.add_argument("--web", action="store_true", help="Local orb, chat, and telemetry interface.")
     parser.add_argument("--port", type=int, default=8765, help="Loopback web interface port.")
     parser.add_argument("--doctor", action="store_true", help="Report model and optional dependency readiness.")
@@ -54,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--full-mem",
         action="store_true",
-        help="Disable low-memory limits (more context, longer replies).",
+        help="Use 8192-token context and up to 1024 output tokens; Ollama manages available RAM.",
     )
     parser.add_argument(
         "--num-ctx",
@@ -67,12 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def speak(text: str, voice: str = DEFAULT_VOICE) -> None:
     try:
-        cmd = ["say", "-v", voice, text[:2000]]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode != 0:
-            subprocess.run(["say", text[:2000]], check=False, timeout=60)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        speak_text(text[:MAX_TEXT_CHARACTERS], voice=voice)
+    except (SpeechError, ValueError) as exc:
+        print(f"JARVIS speech: {exc}", file=sys.stderr)
 
 
 def print_help() -> None:
@@ -83,6 +91,7 @@ Commands:
   :speak on|off  Toggle spoken answers
   :model         Show active model
   :workspace     Show workspace
+  :access on|off  Allow/restrict file access outside the workspace
   :status        Quick system status
   :memory [text] List/search saved facts
   :remember ...  Save a fact explicitly
@@ -96,6 +105,8 @@ Tips for 16GB MacBook:
   Use a 3B–8B model:  ollama pull llama3.2:3b
   Optional stronger small model:  ollama pull phi3:mini  or  gemma2:2b
   Quit other heavy apps while chatting for best latency.
+  --full-mem gives Ollama more context; macOS still manages RAM.
+  --full-access allows file tools across storage you can access.
 """.strip()
     )
 
@@ -129,21 +140,21 @@ def main(argv: list[str] | None = None) -> int:
     low_mem = args.low_mem and not args.full_mem
 
     num_ctx = args.num_ctx
-    if num_ctx is None and low_mem:
-        num_ctx = LOWMEM_NUM_CTX
+    if num_ctx is None:
+        num_ctx = LOWMEM_NUM_CTX if low_mem else FULLMEM_NUM_CTX
 
     client = OllamaClient(
         base_url=args.ollama_url,
         model=args.model,
         temperature=0.25 if low_mem else 0.3,
         num_ctx=num_ctx,
-        num_predict=LOWMEM_NUM_PREDICT if low_mem else None,
+        num_predict=LOWMEM_NUM_PREDICT if low_mem else FULLMEM_NUM_PREDICT,
         keep_alive=LOWMEM_KEEP_ALIVE if low_mem else "10m",
         timeout=args.timeout,
     )
 
     try:
-        toolkit = ToolKit(workspace=workspace, data_dir=data_dir)
+        toolkit = ToolKit(workspace=workspace, data_dir=data_dir, full_disk_access=args.full_access)
     except (OSError, ValueError) as exc:
         print(f"Could not open Jarvis storage: {exc}", file=sys.stderr)
         return 1
@@ -167,10 +178,14 @@ def main(argv: list[str] | None = None) -> int:
         toolkit.execute("notify", {"title": "JARVIS reminder", "message": message})
 
     monitor = SystemMonitor(workspace, memory=toolkit.memory, on_reminder=show_reminder)
+    toolkit.monitor = monitor
     try:
         if args.web:
             from .web import serve
-            return serve(assistant, toolkit, port=args.port, speak_answers=speak_answers, voice=voice)
+            return serve(
+                assistant, toolkit, port=args.port, speak_answers=speak_answers,
+                voice=voice, vision_model=args.vision_model, stt_model=args.stt_model,
+            )
         monitor.start()
         if args.once:
             return ask_once(assistant, args.once, speak_answers, voice)
@@ -223,6 +238,14 @@ def interactive_loop(assistant, args, low_mem, speak_answers, voice) -> int:
             continue
         if user_text == ":workspace":
             print(f"JARVIS: {workspace}")
+            continue
+        if user_text.startswith(":access"):
+            if user_text not in {":access on", ":access off"}:
+                print("JARVIS: Use :access on or :access off, Sir.")
+                continue
+            enabled = user_text == ":access on"
+            assistant.toolkit.set_full_disk_access(enabled)
+            print(f"JARVIS: Storage access is {'all permitted paths' if enabled else 'workspace only'}, Sir.")
             continue
         if user_text == ":status":
             user_text = "Give a brief system status."
