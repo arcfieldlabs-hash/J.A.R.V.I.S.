@@ -18,6 +18,8 @@ class OllamaClient:
         keep_alive: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        if timeout <= 0:
+            raise ValueError("Ollama timeout must be positive.")
         self.model = model
         self.timeout = timeout
         self.temperature = temperature
@@ -38,6 +40,7 @@ class OllamaClient:
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "format": "json",
             "options": options,
         }
         if self.keep_alive is not None:
@@ -55,14 +58,20 @@ class OllamaClient:
             with request.urlopen(req, timeout=self.timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace")
+            details = exc.read(2000).decode("utf-8", errors="replace")
             raise RuntimeError(f"Ollama returned HTTP {exc.code}: {details}") from exc
         except error.URLError as exc:
             raise RuntimeError(
                 f"Could not reach Ollama at {self.base_url}. Start Ollama, then try again."
             ) from exc
+        except TimeoutError as exc:
+            raise RuntimeError(f"Ollama timed out after {self.timeout} seconds. Try a smaller model or increase --timeout.") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RuntimeError("Ollama returned an invalid JSON response.") from exc
 
-        message = data.get("message", {})
+        if not isinstance(data, dict) or not isinstance(data.get("message"), dict):
+            raise RuntimeError("Ollama response did not include an assistant message.")
+        message = data["message"]
         content = message.get("content", "")
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError(f"Ollama response did not include message content: {data}")

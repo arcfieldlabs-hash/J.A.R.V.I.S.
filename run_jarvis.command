@@ -25,6 +25,7 @@ if [ ! -d "$PROJECT_DIR/.venv" ]; then
 fi
 
 source "$PROJECT_DIR/.venv/bin/activate"
+python3 -m pip install -e "$PROJECT_DIR"
 python3 -m jarvis --speak
 
 read "?Press return to close this window."

@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+import ast
+import math
+import operator
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import error, parse, request
 
 from . import desktop as desktop_mod
+from .memory import MemoryStore
 
 try:
     from . import google_native as gnative
@@ -45,9 +50,31 @@ class ToolResult:
 
 
 class ToolKit:
-    def __init__(self, *, workspace: Path) -> None:
+    def __init__(
+        self, *, workspace: Path, data_dir: Path | None = None,
+        permission_handler: Callable[[str, str], bool] | None = None,
+    ) -> None:
         self.workspace = workspace.expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self.memory = MemoryStore(data_dir or self.workspace / ".jarvis")
+        self.permission_handler = permission_handler
+        self._browser = None
+        self._research = None
+
+    @property
+    def research(self):
+        if self._research is None:
+            from .research import ResearchManager
+            self._research = ResearchManager(self.workspace, self.search_results)
+        return self._research
+
+    def close(self) -> None:
+        if self._research is not None:
+            self._research.close()
+            self._research = None
+        if self._browser is not None:
+            self._browser.close()
+            self._browser = None
 
     def execute(self, name: str, args: dict[str, Any], *, why: str = "") -> ToolResult:
         tools = {
@@ -70,6 +97,12 @@ class ToolKit:
             # Google
             "google": self.google,
             "google_native": self.google_native,
+            "memory": self.memory_tool,
+            "reminder": self.reminder,
+            "calculate": self.calculate,
+            "web_read": self.web_read,
+            "browser": self.browser,
+            "research": self.research_tool,
         }
         tool = tools.get(name)
         if tool is None:
@@ -116,22 +149,105 @@ class ToolKit:
         if not query:
             return ToolResult(False, "Missing search query.")
 
-        url = "https://duckduckgo.com/html/?" + parse.urlencode({"q": query})
-        req = request.Request(url, headers={"User-Agent": "Mozilla/5.0 JarvisLocal/1.0"})
         try:
-            with request.urlopen(req, timeout=20) as response:
-                html = response.read().decode("utf-8", errors="replace")
-        except error.URLError as exc:
+            results = self.search_results(query, limit)
+        except (error.URLError, TimeoutError) as exc:
             return ToolResult(False, f"Web search failed: {exc}")
-
-        parser = DuckDuckGoHTMLParser()
-        parser.feed(html)
-        results = parser.results[:limit]
         if not results:
             return ToolResult(False, "No search results were parsed.")
 
         lines = [f"{i}. {r['title']}\n   {r['url']}" for i, r in enumerate(results, 1)]
         return ToolResult(True, "\n".join(lines))
+
+    def search_results(self, query: str, limit: int = 5) -> list[dict[str, str]]:
+        url = "https://duckduckgo.com/html/?" + parse.urlencode({"q": query[:500]})
+        req = request.Request(url, headers={"User-Agent": "Mozilla/5.0 JarvisLocal/1.0"})
+        with request.urlopen(req, timeout=20) as response:
+            html = response.read(1_000_000).decode("utf-8", errors="replace")
+        parser = DuckDuckGoHTMLParser()
+        parser.feed(html)
+        return parser.results[:max(1, min(limit, 8))]
+
+    def memory_tool(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        action = str(args.get("action", "recall")).lower()
+        if action == "remember":
+            memory_id = self.memory.remember(args.get("text", ""))
+            return ToolResult(True, f"Remembered fact {memory_id}.")
+        if action == "recall":
+            facts = self.memory.recall(args.get("query", ""), args.get("limit", 5))
+            return ToolResult(True, json.dumps(facts, ensure_ascii=False))
+        if action == "forget":
+            removed = self.memory.forget(args["id"])
+            return ToolResult(removed, "Forgot that fact." if removed else "No fact with that ID.")
+        return ToolResult(False, "memory actions: remember(text), recall(query), forget(id).")
+
+    def reminder(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        action = str(args.get("action", "list")).lower()
+        if action == "add":
+            result = self.memory.add_reminder(args.get("text", ""), args.get("due_at", ""))
+            return ToolResult(True, json.dumps(result))
+        if action == "list":
+            return ToolResult(True, json.dumps(self.memory.list_reminders()))
+        if action == "cancel":
+            removed = self.memory.cancel_reminder(args["id"])
+            return ToolResult(removed, "Cancelled reminder." if removed else "No pending reminder with that ID.")
+        return ToolResult(False, "reminder actions: add(text,due_at ISO8601 with timezone), list, cancel(id).")
+
+    def calculate(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        expression = str(args.get("expression", "")).strip()
+        if not expression or len(expression) > 200:
+            return ToolResult(False, "Provide an arithmetic expression of at most 200 characters.")
+        tree = ast.parse(expression, mode="eval")
+        if len(list(ast.walk(tree))) > 80:
+            return ToolResult(False, "Expression is too complex.")
+        binary = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+                  ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
+                  ast.Mod: operator.mod, ast.Pow: operator.pow}
+
+        def evaluate(node):
+            if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+                value = node.value
+            elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+                value = evaluate(node.operand) * (-1 if isinstance(node.op, ast.USub) else 1)
+            elif isinstance(node, ast.BinOp) and type(node.op) in binary:
+                left, right = evaluate(node.left), evaluate(node.right)
+                if isinstance(node.op, ast.Pow) and abs(right) > 100:
+                    raise ValueError("Exponent must be within -100 to 100.")
+                value = binary[type(node.op)](left, right)
+            else:
+                raise ValueError("Only numbers and arithmetic operators are supported.")
+            if type(value) not in (int, float) or not math.isfinite(value) or abs(value) > 1e100:
+                raise ValueError("Result is outside the supported numeric range.")
+            return value
+
+        return ToolResult(True, str(evaluate(tree.body)))
+
+    def web_read(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        from .research import fetch_page
+        return ToolResult(True, json.dumps(fetch_page(str(args.get("url", ""))), ensure_ascii=False))
+
+    def browser(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        if args.get("action") == "close":
+            if self._browser is not None:
+                self._browser.close()
+                self._browser = None
+            return ToolResult(True, "Browser closed.")
+        if self._browser is None:
+            from .browser import BrowserController
+            self._browser = BrowserController(self.workspace, self._ask_permission)
+        return ToolResult(True, self._browser.dispatch(args, why))
+
+    def research_tool(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        action = str(args.get("action", "start")).lower()
+        if action == "start":
+            result = self.research.start(str(args.get("query", "")))
+        elif action == "status":
+            result = self.research.status(str(args.get("id", "")))
+        elif action == "list":
+            result = self.research.list_jobs()
+        else:
+            return ToolResult(False, "research actions: start(query), status(id), list.")
+        return ToolResult(True, json.dumps(result, ensure_ascii=False))
 
     def read_file(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
         path = self._safe_path(str(args.get("path", "")).strip())
@@ -358,7 +474,7 @@ end tell
         if mutating and not self._ask_permission(full, why or "Google action that may modify data"):
             return ToolResult(False, "User denied Google action.")
 
-        completed = subprocess.run(full, shell=True, capture_output=True, text=True, timeout=60)
+        completed = subprocess.run(["gog", *shlex.split(command)], capture_output=True, text=True, timeout=60)
         output = "\n".join(p for p in [completed.stdout, completed.stderr] if p).strip()
         if len(output) > MAX_COMMAND_OUTPUT:
             output = output[:MAX_COMMAND_OUTPUT] + "\n...[truncated]"
@@ -406,6 +522,8 @@ end tell
         return any(re.search(pattern, lowered) for pattern in DANGEROUS_COMMAND_PATTERNS)
 
     def _ask_permission(self, command: str, why: str) -> bool:
+        if self.permission_handler is not None:
+            return bool(self.permission_handler(command, why))
         print("\nJARVIS requires your authorisation:")
         if why:
             print(f"Reason: {why}")

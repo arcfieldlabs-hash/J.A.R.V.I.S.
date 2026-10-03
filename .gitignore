@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.jarvis/
+.env
+.env.*
+!.env.example
+.ollama.log
+credentials.json
+token.json
+node_modules/
+.wrangler/
+.dev.vars
