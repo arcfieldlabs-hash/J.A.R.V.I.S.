@@ -26,6 +26,13 @@ except Exception:  # pragma: no cover
 MAX_FILE_BYTES = 120_000
 MAX_COMMAND_OUTPUT = 12_000
 
+CORE_TOOL_NAMES = (
+    "open_app", "run_command", "web_search", "read_file", "write_file", "list_files",
+    "system_status", "notify", "set_volume", "open_url", "activate_app", "frontmost_app",
+    "screenshot", "list_windows", "desktop", "google", "google_native", "memory",
+    "reminder", "calculate", "web_read", "browser", "research", "selfdev",
+)
+
 DANGEROUS_COMMAND_PATTERNS = [
     r"\brm\s+-[^\n]*r",
     r"\bsudo\b",
@@ -65,6 +72,49 @@ class ToolKit:
         self.monitor = None
         self._browser = None
         self._research = None
+        self._extensions = None
+        self._development = None
+        self.development_permission_handler: Callable[[str, dict[str, Any]], bool] | None = None
+
+    @property
+    def extensions(self):
+        if self._extensions is None:
+            from .extensions import ExtensionRegistry
+            data_dir = self.memory.db_path.parent
+            self._extensions = ExtensionRegistry(
+                data_dir / "extensions", self.workspace, data_dir,
+            )
+        return self._extensions
+
+    @property
+    def development(self):
+        if self._development is None:
+            from .selfdev import SelfDevelopment
+            self._development = SelfDevelopment(
+                source_root=Path(__file__).resolve().parent,
+                data_dir=self.memory.db_path.parent,
+                workspace=self.workspace,
+                registry=self.extensions,
+                permission_handler=self._development_permission,
+            )
+        return self._development
+
+    def extension_catalog(self) -> list[dict[str, Any]]:
+        # Avoid creating private development storage during ordinary startup.
+        if self._extensions is None and not (self.memory.db_path.parent / "extensions").exists():
+            return []
+        return self.extensions.catalog()
+
+    @property
+    def available_tools(self) -> tuple[str, ...]:
+        return (*CORE_TOOL_NAMES, *(entry["name"] for entry in self.extension_catalog()))
+
+    def _development_permission(self, action: str, details: dict[str, Any]) -> bool:
+        if self.development_permission_handler is not None:
+            return bool(self.development_permission_handler(action, details))
+        print("\nJARVIS code review:")
+        print(json.dumps(details, ensure_ascii=False, indent=2))
+        return self._ask_permission(action, "Review the complete code and arguments above before allowing it.")
 
     def set_full_disk_access(self, enabled: bool) -> None:
         """Allow file tools to use paths the operating system permits.
@@ -119,14 +169,28 @@ class ToolKit:
             "web_read": self.web_read,
             "browser": self.browser,
             "research": self.research_tool,
+            "selfdev": self.selfdev_tool,
         }
         tool = tools.get(name)
-        if tool is None:
-            return ToolResult(False, f"Unknown tool: {name}")
         try:
+            if tool is None:
+                if name not in {entry["name"] for entry in self.extension_catalog()}:
+                    return ToolResult(False, f"Unknown tool: {name}")
+                if not self.development.enabled:
+                    return ToolResult(False, "Self-development is off. Enable it in Permissions or with :develop on before running an extension.")
+                def approve_extension(action, details):
+                    return (self.development.enabled
+                            and self._development_permission(action, details)
+                            and self.development.enabled)
+                result = self.extensions.invoke(name, args, approve_extension)
+                return ToolResult(bool(result.get("ok")), str(result.get("content", "")))
             return tool(args, why=why)
         except Exception as exc:
             return ToolResult(False, f"{type(exc).__name__}: {exc}")
+
+    def selfdev_tool(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        result = self.development.handle(args)
+        return ToolResult(bool(result.get("ok")), json.dumps(result, ensure_ascii=False))
 
     # ── Core ────────────────────────────────────────────────────
 
@@ -248,6 +312,10 @@ class ToolKit:
                 self._browser.close()
                 self._browser = None
             return ToolResult(True, "Browser closed.")
+        if args.get("action") == "screenshot":
+            destination = (self.workspace / str(args.get("filename", "browser.png"))).resolve()
+            if self.development.protect_path(destination):
+                return ToolResult(False, "Screenshot output cannot overwrite Jarvis source or development approvals.")
         if self._browser is None:
             from .browser import BrowserController
             self._browser = BrowserController(self.workspace, self._ask_permission)
@@ -290,6 +358,8 @@ class ToolKit:
             return ToolResult(False, "File path is outside the configured workspace.")
         if mode not in {"overwrite", "append"}:
             return ToolResult(False, "Mode must be overwrite or append.")
+        if self.development.protect_path(path):
+            return ToolResult(False, "Jarvis source and development approvals are protected. Use selfdev propose, review, test, and apply for approved changes.")
 
         path.parent.mkdir(parents=True, exist_ok=True)
         if mode == "append":
@@ -416,7 +486,9 @@ class ToolKit:
         filename = str(args.get("filename", "screenshot.png")).strip() or "screenshot.png"
         if "/" in filename or "\\" in filename:
             filename = Path(filename).name
-        dest = self.workspace / filename
+        dest = (self.workspace / filename).resolve()
+        if self.development.protect_path(dest):
+            return ToolResult(False, "Screenshot output cannot overwrite Jarvis source or development approvals.")
         completed = subprocess.run(
             ["screencapture", "-x", "-t", "png", str(dest)],
             capture_output=True, text=True, timeout=15,

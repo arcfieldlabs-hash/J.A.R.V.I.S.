@@ -60,6 +60,7 @@ Avoid 13B+ on 16GB while doing normal work — swapping will make everything slo
 - GPU readings when the operating system exposes them
 - Optional access to files across your Mac, plus a larger model context
 - Camera, microphone, and individually selected screens with immediate off controls
+- Inspect its own source, propose new tools or code changes, run approved tests, and install approved changes with backups
 
 These additions follow the capability outline in the supplied **Safari.pdf** preview of *Build Your Own J.A.R.V.I.S.*. They retain this project's macOS/Ollama design. See [CAPABILITIES.md](CAPABILITIES.md) for the mapping and practical limits.
 
@@ -86,7 +87,7 @@ python3 -m jarvis --doctor
 
 Voice mode records bounded utterances, accepts a command after "Jarvis", closes the microphone during the reply, and waits briefly before listening again. Say the name alone to open a 15-second window for your next utterance. Use Ctrl-C to stop. `--listen` speaks replies automatically. The local web interface generates speech on your Mac and plays it in the browser, using the same installed voice.
 
-The web server binds only to `127.0.0.1`. CLI authorization prompts remain available for shell commands, desktop input, Google changes, and browser clicks/fills. These actions are denied in web mode; use the CLI when they require approval. `--once`, `--listen`, `--web`, and `--menubar` are separate modes.
+The web server binds only to `127.0.0.1`. The local orb shows approval cards for self-development tests, installation, rollback, and custom tool execution. Shell commands, desktop input, Google changes, and browser clicks/fills still require CLI approval. `--once`, `--listen`, `--web`, and `--menubar` are separate modes.
 
 ## Update an existing installation
 
@@ -96,13 +97,13 @@ Stop Jarvis with Ctrl-C, then run:
 cd ~/jarvis
 git pull
 source .venv/bin/activate
-brew install portaudio
-python3 -m pip install -e '.[voice]'
-ollama pull moondream
-python3 -m jarvis --web --speak --full-access --full-mem
+python3 -m pip install -e .
+python3 -m jarvis --web --speak
 ```
 
-The voice extra supplies local Whisper transcription; PortAudio supports terminal microphone listening. `moondream` is the separate local vision model used for camera and screen snapshots. Text chat still uses `llama3.2:3b`. If you only want chat, speech, and metrics, `python3 -m pip install -e .` is sufficient.
+Add `--full-access` for files across your Mac or `--full-mem` for the larger context. Add `--self-develop` to enable code proposals at startup, or turn on the local orb's code changes switch. Each execution or installation still asks for approval.
+
+For microphone transcription and camera/screen analysis, also run `brew install portaudio`, `python3 -m pip install -e '.[voice]'`, and `ollama pull moondream`. The voice extra supplies local Whisper transcription; PortAudio supports terminal microphone listening. `moondream` is the separate local vision model. Text chat still uses `llama3.2:3b`.
 
 For a British male voice, install **Daniel (Enhanced)** or **Daniel (Premium)** in **System Settings → Accessibility → Read & Speak → System Voice → Manage Voices → English (United Kingdom)**. Older macOS versions call this panel **Spoken Content**. Jarvis prefers the best installed Daniel variant. This is a movie-inspired voice using Apple's speech engine; it does not clone the actor's voice. Select another installed voice with `--voice "Voice name"`.
 
@@ -141,7 +142,68 @@ Navigate the browser to https://example.com and read the page.
 
 The terminal also supports `:memory [query]`, `:remember a fact`, `:forget ID`, `:reminders`, and `:jobs` without a model call. Reminders require an unambiguous date/time; Jarvis's tool uses timezone-aware ISO8601 timestamps. Reminders are delivered once while the process runs, including overdue reminders after a restart. Research runs in one background worker, collects up to four web-page excerpts, and saves source-linked Markdown under `<workspace>/research/`. Jobs are tracked during the current session; saved reports remain after exit. Pending jobs are cancelled on shutdown, and an active fetch may finish before Python exits. Keep an interactive or web session running for background work.
 
-Tool calls are bounded per request. Repeated identical actions are stopped, and the final model round accepts an answer only. If the model cannot finish its explanation, Jarvis reports the confirmed tool results, including any completed writes or other actions. Tool exchanges stay within the current request; later conversation turns receive completed user/reply pairs. Asking to assign research without a topic should prompt for the topic. Reading Jarvis's source does not automatically add new tools; extensions require code changes, approval where applicable, and a restart.
+Tool calls are bounded per request. Repeated identical actions are stopped, and the final model round accepts an answer only. If the model cannot finish its explanation, Jarvis reports the confirmed tool results, including any completed writes or other actions. Tool exchanges stay within the current request; later conversation turns receive completed user/reply pairs. Asking to assign research without a topic should prompt for the topic.
+
+## Let Jarvis build new tools
+
+Enable **code changes** in the local orb, or start with `--self-develop`. This switch starts off on a fresh installation and remembers your choice; it permits proposals but does not authorize running generated code. Jarvis can inspect its source and prepare either a standalone tool extension or a core code patch. Ask, for example:
+
+```text
+Build a tool that counts words in text. Show me its code and test it,
+then ask before installing.
+```
+
+Review the complete proposed code or diff in the approval card. **Testing requires your approval**, because tests execute Python. Once the tests pass, **installation requires another approval**. Jarvis saves a backup before applying the change. New extensions become available after installation; core code changes require a restart. Rollback also requires approval, and reverting core code requires a restart. Reject a proposal or turn off code changes whenever you want.
+
+Proposals are stored under `<data-dir>/selfdev/`; installed extensions are under `<data-dir>/extensions/`, normally inside `~/.jarvis/`. Extensions have names beginning with `ext_`, a description, a JSON Schema for their parameters, and sample arguments for testing. Their Python code defines `run(args, context)` and returns a JSON-compatible result. The context supplies the workspace and data directory. Jarvis discovers installed extensions at startup and refreshes its tool catalog after installation.
+
+For example, a word-count extension needs only:
+
+```python
+def run(args, context):
+    return {"words": len(args["text"].split())}
+```
+
+Its `selfdev` proposal arguments are:
+
+```json
+{
+  "action": "propose",
+  "kind": "extension",
+  "name": "ext_word_count",
+  "description": "Count words in supplied text",
+  "parameters": {
+    "type": "object",
+    "properties": {"text": {"type": "string"}},
+    "required": ["text"],
+    "additionalProperties": false
+  },
+  "code": "def run(args, context):\n    return {\"words\": len(args[\"text\"].split())}\n",
+  "sample_args": {"text": "Hello Sir"}
+}
+```
+
+Core proposals supply a `title` and either a `patch` containing a unified diff with `--- a/path` and `+++ b/path` headers, or `files` with the relative source `path` and complete replacement `content` for each file. Small patches let Jarvis edit existing modules without generating their entire contents; use `files` to create new files. Patches are checked in a temporary copy before staging. Core tests run against a copy of the proposed source, and installation is blocked if the original source has changed. Review the resulting diff before approving its tests or application.
+
+Every custom tool invocation asks for approval. Generated Python runs with your Mac account's privileges; process timeouts limit execution duration, but they do not create an operating-system sandbox. Review the code and its tests before approving it. Dependency installation and publishing to GitHub remain separate manual steps or approved CLI shell actions.
+
+## Change permissions
+
+The local orb has separate switches for broader storage access and code changes. Storage access does not automatically enable self-development. Camera, microphone, and each shared screen have their own on/off controls; **Stop all** releases all device streams.
+
+In the terminal, use these commands without a model call:
+
+```text
+:permissions
+:access on
+:access off
+:develop on
+:develop off
+```
+
+`:permissions` shows the current settings. `--full-access` enables broader storage for the session; omit it to start with storage restricted to the workspace. `--self-develop` enables code development, whose setting is saved locally; turn it off in the orb or with `:develop off` to revoke it. Approval prompts still govern shell commands, desktop actions, and generated code execution.
+
+For protected folders, go to **System Settings → Privacy & Security → Full Disk Access**, enable the app launching Jarvis, usually **Terminal**, and restart that app. For camera and microphone, allow your browser in the corresponding Privacy & Security panels and in the browser's site permission prompt. For shared screens, allow the browser under **Screen & System Audio Recording** and choose each screen or window in its sharing dialog. macOS permissions apply even when Jarvis's own switches are on.
 
 ## Install from a fresh clone
 
@@ -169,6 +231,7 @@ Jarvis supports Python 3.10+ and includes `psutil` as its core runtime dependenc
 | `--num-ctx 2048` | Override context size |
 | `--workspace ...` | Safe file root |
 | `--full-access` | Files across storage within your Mac account's permissions |
+| `--self-develop` | Enable code proposals; tests, installation, and custom tools still require approval |
 | `--once "..."` | One-shot |
 | `--menubar` | Menu-bar companion |
 | `--no-tools` | Chat only |
@@ -206,7 +269,7 @@ Cloudflare can host the static orb interface as a preview. The repository's
 `wrangler.jsonc` points to `./web`; run `npm ci` and `npm run check` to validate it
 locally. Follow [Cloudflare-deployment.md](Cloudflare-deployment.md) for the exact
 build settings and branch to deploy. Chat, Ollama, memory, telemetry, desktop
-tools, and hardware controls run in the local Python application on your Mac.
+tools, hardware controls, and self-development run in the local Python application on your Mac. The hosted preview keeps development controls disabled.
 
 ## Validation
 
@@ -215,7 +278,7 @@ python3 -m pip install -e .
 python3 -m unittest discover -s .
 ```
 
-Tests use fake model responses and mocked microphone, camera, screen, GPU, and network services. Real macOS permissions, GPU driver readings, speech hardware, downloaded voice models, Google OAuth, and Ollama inference must be verified on your Mac. `--doctor` checks installed Python dependencies and the selected Ollama model; it does not load Whisper or verify Chromium binaries or microphone access.
+Tests use fake model responses and mocked microphone, camera, screen, GPU, and network services. Self-development tests cover proposals, explicit approvals, generated-code execution, application, and rollback. Real macOS permissions, GPU driver readings, speech hardware, downloaded voice models, Google OAuth, and Ollama inference must be verified on your Mac. `--doctor` checks installed Python dependencies and the selected Ollama model; it does not load Whisper or verify Chromium binaries or microphone access.
 
 ## OpenClaw
 
