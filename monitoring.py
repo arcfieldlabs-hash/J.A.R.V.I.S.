@@ -11,9 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .gpu import GPUReader
+
 try:
     import psutil
-except ImportError:  # Optional: disk, load and reminders work without it.
+except ImportError:  # Graceful upgrade path for older installs missing psutil.
     psutil = None
 
 
@@ -45,6 +47,8 @@ class SystemMonitor:
         self._started_at = time.monotonic()
         self._network_sample: tuple[float, int, int] | None = None
         self._cpu_thread_id: int | None = None
+        self._cpu_core_thread_id: int | None = None
+        self._gpu_reader = GPUReader()
         self._deliveries: list[dict[str, Any]] = []
         self._state: dict[str, Any] = {}
         self._sample_metrics()
@@ -86,11 +90,13 @@ class SystemMonitor:
             "workspace": str(self.workspace),
             "uptime_seconds": round(now - self._started_at, 1),
             "cpu_percent": None,
+            "cpu": {"core_percent": None, "logical_cores": None, "physical_cores": None},
             "load_average": None,
             "memory": None,
             "disk": None,
             "network": None,
             "gpu": None,
+            "gpu_reason": None,
             "metrics_source": "stdlib" if psutil is None else "psutil",
             "errors": [],
         }
@@ -108,19 +114,56 @@ class SystemMonitor:
             }
         except OSError:
             state["errors"].append("Workspace disk metrics unavailable.")
-        if psutil is not None:
+        if psutil is None:
+            state["errors"].append("CPU, RAM and network metrics need psutil; run python -m pip install -e .")
+        else:
+            thread_id = threading.get_ident()
             try:
                 cpu = psutil.cpu_percent(interval=None)
                 # psutil maintains its CPU baseline separately for each thread.
-                thread_id = threading.get_ident()
                 state["cpu_percent"] = cpu if self._cpu_thread_id == thread_id else None
                 self._cpu_thread_id = thread_id
+            except Exception:
+                state["errors"].append("CPU usage unavailable.")
+            try:
+                cores = psutil.cpu_percent(interval=None, percpu=True)
+                state["cpu"]["core_percent"] = cores if self._cpu_core_thread_id == thread_id else None
+                self._cpu_core_thread_id = thread_id
+            except Exception:
+                state["errors"].append("Per-core CPU usage unavailable.")
+            for key, logical in (("logical_cores", True), ("physical_cores", False)):
+                try:
+                    state["cpu"][key] = psutil.cpu_count(logical=logical)
+                except Exception:
+                    state["errors"].append(f"{key.replace('_', ' ').capitalize()} unavailable.")
+            try:
                 memory = psutil.virtual_memory()
                 state["memory"] = {
                     "total_bytes": memory.total,
                     "available_bytes": memory.available,
+                    "used_bytes": getattr(memory, "used", None),
                     "percent": memory.percent,
+                    "swap": None,
+                    "process_rss_bytes": None,
                 }
+            except Exception:
+                state["errors"].append("RAM metrics unavailable.")
+            if state["memory"] is not None:
+                try:
+                    swap = psutil.swap_memory()
+                    state["memory"]["swap"] = {
+                        "total_bytes": swap.total,
+                        "used_bytes": swap.used,
+                        "free_bytes": swap.free,
+                        "percent": swap.percent,
+                    }
+                except Exception:
+                    state["errors"].append("Swap metrics unavailable.")
+                try:
+                    state["memory"]["process_rss_bytes"] = psutil.Process(os.getpid()).memory_info().rss
+                except Exception:
+                    state["errors"].append("Jarvis process RAM metrics unavailable.")
+            try:
                 network = psutil.net_io_counters()
                 if network is not None:
                     previous = self._network_sample
@@ -139,7 +182,11 @@ class SystemMonitor:
                     }
                     self._network_sample = (now, network.bytes_sent, network.bytes_recv)
             except Exception:
-                state["errors"].append("Optional CPU, memory or network metrics unavailable.")
+                state["errors"].append("Network metrics unavailable.")
+        try:
+            state["gpu"], state["gpu_reason"] = self._gpu_reader.snapshot()
+        except Exception:
+            state["gpu_reason"] = "GPU metrics could not be read from the operating system."
         with self._lock:
             self._state = state
 

@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 from jarvis import cli
 from jarvis.memory import MemoryStore
+from jarvis.speech import SpeechError
 
 
 class CliTests(unittest.TestCase):
@@ -98,13 +99,69 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(cli.main(self.paths + [
             "--web", "--port", "9123", "--speak", "--voice", "Samantha",
+            "--vision-model", "llava", "--stt-model", "tiny",
         ]), 0)
 
         serve.assert_called_once_with(
-            self.assistant, self.toolkit, port=9123, speak_answers=True, voice="Samantha"
+            self.assistant, self.toolkit, port=9123, speak_answers=True, voice="Samantha",
+            vision_model="llava", stt_model="tiny",
         )
         self.monitor.start.assert_not_called()
         self.assert_runtime_closed()
+
+    def test_default_profile_is_bounded_and_storage_is_workspace_only(self):
+        self.fake_runtime()
+        self.assertEqual(cli.main(self.paths + ["--once", "hello"]), 0)
+        options = self.client_factory.call_args.kwargs
+        self.assertEqual(options["num_ctx"], 2048)
+        self.assertEqual(options["num_predict"], 256)
+        self.toolkit_factory.assert_called_once_with(
+            workspace=self.workspace.resolve(), data_dir=self.data_dir.resolve(), full_disk_access=False,
+        )
+        self.assertIs(self.toolkit.monitor, self.monitor)
+
+    def test_full_memory_profile_sets_context_and_prediction_limits(self):
+        self.fake_runtime()
+        self.assertEqual(cli.main(self.paths + ["--once", "hello", "--full-mem"]), 0)
+        options = self.client_factory.call_args.kwargs
+        self.assertEqual(options["num_ctx"], 8192)
+        self.assertEqual(options["num_predict"], 1024)
+        self.assertEqual(options["keep_alive"], "10m")
+
+    def test_explicit_context_override_is_preserved_with_full_memory(self):
+        self.fake_runtime()
+        self.assertEqual(cli.main(self.paths + ["--once", "hello", "--full-mem", "--num-ctx", "4096"]), 0)
+        self.assertEqual(self.client_factory.call_args.kwargs["num_ctx"], 4096)
+
+    def test_full_access_flag_grants_storage_access(self):
+        self.fake_runtime()
+        self.assertEqual(cli.main(self.paths + ["--once", "hello", "--full-access"]), 0)
+        self.toolkit_factory.assert_called_once_with(
+            workspace=self.workspace.resolve(), data_dir=self.data_dir.resolve(), full_disk_access=True,
+        )
+
+    def test_interactive_storage_access_can_be_granted_and_revoked(self):
+        self.fake_runtime()
+        self.assistant.toolkit = self.toolkit
+        self.toolkit.workspace = self.workspace
+        self.stack.enter_context(patch("builtins.input", side_effect=[":access on", ":access off", ":quit"]))
+        self.assertEqual(cli.main(self.paths), 0)
+        self.assertEqual(
+            [call.args for call in self.toolkit.set_full_disk_access.call_args_list], [(True,), (False,)],
+        )
+        self.assistant.ask.assert_not_called()
+
+    def test_speech_uses_selected_native_voice_and_bounds_text(self):
+        native_speech = self.stack.enter_context(patch("jarvis.cli.speak_text"))
+        cli.speak("a" * 1800, "Daniel")
+        native_speech.assert_called_once_with("a" * 1600, voice="Daniel")
+
+    def test_speech_failure_reports_help_and_does_not_retry_another_voice(self):
+        native_speech = self.stack.enter_context(patch("jarvis.cli.speak_text"))
+        native_speech.side_effect = SpeechError("Install Daniel in System Settings.")
+        cli.speak("hello", "Daniel")
+        self.assertIn("JARVIS speech: Install Daniel in System Settings.", self.stderr.getvalue())
+        native_speech.assert_called_once_with("hello", voice="Daniel")
 
     def test_web_failure_reports_the_error_and_releases_services(self):
         self.fake_runtime()

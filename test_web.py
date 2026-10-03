@@ -99,7 +99,7 @@ class WebTests(unittest.TestCase):
             self.assertEqual(config["csrfToken"], server.csrf_token)
             self.assertEqual(config["voice"], voice)
             self.assertNotIn(voice, page)
-            self.assertEqual(page.count("<script"), 2)
+            self.assertEqual(page.count("<script"), 3)
         finally:
             server.server_close()
 

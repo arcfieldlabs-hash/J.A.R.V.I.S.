@@ -53,13 +53,29 @@ class ToolKit:
     def __init__(
         self, *, workspace: Path, data_dir: Path | None = None,
         permission_handler: Callable[[str, str], bool] | None = None,
+        full_disk_access: bool = False,
     ) -> None:
         self.workspace = workspace.expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.memory = MemoryStore(data_dir or self.workspace / ".jarvis")
         self.permission_handler = permission_handler
+        self.full_disk_access = False
+        self.set_full_disk_access(full_disk_access)
+        self.screen_capture_allowed = True
+        self.monitor = None
         self._browser = None
         self._research = None
+
+    def set_full_disk_access(self, enabled: bool) -> None:
+        """Allow file tools to use paths the operating system permits.
+
+        This switches Jarvis's workspace restriction; it does not grant macOS
+        privacy permissions, administrator access, or permission to run shell
+        commands. Disabling it restores the workspace restriction immediately.
+        """
+        if not isinstance(enabled, bool):
+            raise ValueError("Full storage access must be enabled or disabled with a boolean.")
+        self.full_disk_access = enabled
 
     @property
     def research(self):
@@ -258,7 +274,8 @@ class ToolKit:
         if path.is_dir():
             return ToolResult(False, f"Path is a directory: {path}")
 
-        data = path.read_bytes()
+        with path.open("rb") as file:
+            data = file.read(MAX_FILE_BYTES + 1)
         truncated = len(data) > MAX_FILE_BYTES
         text = data[:MAX_FILE_BYTES].decode("utf-8", errors="replace")
         if truncated:
@@ -301,6 +318,12 @@ class ToolKit:
         return ToolResult(True, "\n".join(entries) or "(empty)")
 
     def system_status(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        if self.monitor is not None:
+            try:
+                return ToolResult(True, json.dumps(self.monitor.snapshot(), ensure_ascii=False))
+            except Exception:
+                # Keep the existing lightweight fallback if sampling fails.
+                pass
         parts: list[str] = []
         try:
             batt = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5)
@@ -386,6 +409,10 @@ class ToolKit:
         return ToolResult(True, completed.stdout.strip() or "unknown")
 
     def screenshot(self, args: dict[str, Any], *, why: str = "") -> ToolResult:
+        if not self.screen_capture_allowed:
+            return ToolResult(
+                False, "Use the selected screen controls in the local orb to capture a snapshot.",
+            )
         filename = str(args.get("filename", "screenshot.png")).strip() or "screenshot.png"
         if "/" in filename or "\\" in filename:
             filename = Path(filename).name
@@ -511,6 +538,8 @@ end tell
         raw = Path(user_path).expanduser()
         candidate = raw if raw.is_absolute() else self.workspace / raw
         resolved = candidate.resolve()
+        if self.full_disk_access:
+            return resolved
         try:
             resolved.relative_to(self.workspace)
         except ValueError:

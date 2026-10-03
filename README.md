@@ -43,7 +43,7 @@ Avoid 13B+ on 16GB while doing normal work — swapping will make everything slo
 ## What it can do
 
 - British dry-wit personality (“Sir”)
-- Speak with macOS `say` (Daniel)
+- Speak with the installed British Daniel voice, preferring Enhanced or Premium quality
 - Desktop: open/activate apps, windows, screenshots, volume, notifications
 - Advanced desktop (with confirmation): type, key, click, window bounds
 - Files, shell (approved), web search
@@ -55,7 +55,11 @@ Avoid 13B+ on 16GB while doing normal work — swapping will make everything slo
 - Safe arithmetic, live web-page reading, and background research with source links
 - Optional Chromium browser control with approved clicks and form input
 - Optional local Whisper microphone input with a configurable wake word
-- Local orb interface with chat, speech output, display modes, and system telemetry
+- Local orb interface with chat, native Mac speech, display modes, and system telemetry
+- CPU, RAM, disk, and network metrics with `psutil` included in the normal install
+- GPU readings when the operating system exposes them
+- Optional access to files across your Mac, plus a larger model context
+- Camera, microphone, and individually selected screens with immediate off controls
 
 These additions follow the capability outline in the supplied **Safari.pdf** preview of *Build Your Own J.A.R.V.I.S.*. They retain this project's macOS/Ollama design. See [CAPABILITIES.md](CAPABILITIES.md) for the mapping and practical limits.
 
@@ -64,11 +68,8 @@ These additions follow the capability outline in the supplied **Safari.pdf** pre
 Run these commands from the cloned repository after installing the package:
 
 ```bash
-# Orb, chat, telemetry, and browser speech at http://127.0.0.1:8765
+# Orb, chat, telemetry, and Mac speech at http://127.0.0.1:8765
 python3 -m jarvis --web --speak
-
-# Optional detailed CPU, memory, and network metrics
-python3 -m pip install -e '.[monitor]'
 
 # Optional microphone + local Whisper (downloads model weights on first use)
 brew install portaudio
@@ -83,9 +84,43 @@ python3 -m playwright install chromium
 python3 -m jarvis --doctor
 ```
 
-Voice mode records bounded utterances, accepts a command after "Jarvis", closes the microphone during the reply, and waits briefly before listening again. Say the name alone to open a 15-second window for your next utterance. Use Ctrl-C to stop. `--listen` speaks replies automatically; the web interface uses browser voices and text input.
+Voice mode records bounded utterances, accepts a command after "Jarvis", closes the microphone during the reply, and waits briefly before listening again. Say the name alone to open a 15-second window for your next utterance. Use Ctrl-C to stop. `--listen` speaks replies automatically. The local web interface generates speech on your Mac and plays it in the browser, using the same installed voice.
 
 The web server binds only to `127.0.0.1`. CLI authorization prompts remain available for shell commands, desktop input, Google changes, and browser clicks/fills. These actions are denied in web mode; use the CLI when they require approval. `--once`, `--listen`, `--web`, and `--menubar` are separate modes.
+
+## Update an existing installation
+
+Stop Jarvis with Ctrl-C, then run:
+
+```bash
+cd ~/jarvis
+git pull
+source .venv/bin/activate
+brew install portaudio
+python3 -m pip install -e '.[voice]'
+ollama pull moondream
+python3 -m jarvis --web --speak --full-access --full-mem
+```
+
+The voice extra supplies local Whisper transcription; PortAudio supports terminal microphone listening. `moondream` is the separate local vision model used for camera and screen snapshots. Text chat still uses `llama3.2:3b`. If you only want chat, speech, and metrics, `python3 -m pip install -e .` is sufficient.
+
+For a British male voice, install **Daniel (Enhanced)** or **Daniel (Premium)** in **System Settings → Accessibility → Read & Speak → System Voice → Manage Voices → English (United Kingdom)**. Older macOS versions call this panel **Spoken Content**. Jarvis prefers the best installed Daniel variant. This is a movie-inspired voice using Apple's speech engine; it does not clone the actor's voice. Select another installed voice with `--voice "Voice name"`.
+
+## Storage, RAM, and live metrics
+
+File tools start inside the selected `--workspace`. `--full-access` permits reading and writing paths anywhere your Mac account can access, including external volumes. Relative paths still refer to the workspace. The local orb's storage switch can enable or revoke broader file access while Jarvis runs. macOS permissions continue to apply: grant the app launching Python, usually **Terminal**, access in **System Settings → Privacy & Security → Full Disk Access** if you need protected folders. Restart that app after changing the permission. Shell commands and desktop controls retain their existing approval requirements.
+
+`--full-mem` raises the model context to 8,192 tokens, reply limit to 1,024 tokens, and history limits. It lets Ollama use more available RAM for your conversation. It does not allocate all physical RAM or grant access to other processes' private memory. Watch RAM and swap readings on a 16GB Mac; use the smaller default profile when you need headroom. `--num-ctx` overrides the context size.
+
+`psutil` is the library that reads system statistics. It installs with Jarvis and supplies CPU load, individual core load and core counts, RAM used and available, swap, Jarvis process memory, disk usage, and network upload/download rates. Network rates measure traffic across the monitored machine, rather than only Jarvis traffic. On macOS, GPU activity and allocation come from IORegistry when the driver exposes them; GPU names come from `system_profiler`. Unsupported readings appear as unavailable. No administrator command is needed to collect these metrics. The older `.[monitor]` install option remains compatible.
+
+## Camera, microphone, and screens
+
+Open the local orb at **http://127.0.0.1:8765**. All device controls start **off**. Enable a device to request browser permission; choose each screen or window through the browser's sharing dialog. Add another screen individually if you use several displays. Turning a device off stops its browser tracks immediately; individual screen stops and **Stop all** are also available. Nothing is captured automatically after a restart.
+
+Camera and screen analysis uses an explicit snapshot and question sent to your local Ollama vision model. Enabling a preview alone does not continuously analyze it. Microphone input uses an explicit bounded recording, transcribed locally by Whisper; it pauses while Jarvis speaks. Turning a source off suppresses results from its pending captures.
+
+Grant camera and microphone access when your browser asks. For screen sharing, allow the browser in **System Settings → Privacy & Security → Screen & System Audio Recording** (called **Screen Recording** on older macOS), then restart the browser if prompted. These controls require the local Python application. The Cloudflare preview keeps hardware controls disabled.
 
 ## Memory, reminders, and research
 
@@ -118,31 +153,34 @@ ollama pull llama3.2:3b
 python3 -m jarvis --speak
 ```
 
-The core has no third-party runtime dependencies and supports Python 3.10+. A virtual environment is recommended for the optional voice and browser packages. Model caches should stay on a local SSD outside cloud-synced folders.
+Jarvis supports Python 3.10+ and includes `psutil` as its core runtime dependency. A virtual environment is recommended for the optional voice and browser packages. Model caches should stay on a local SSD outside cloud-synced folders.
 
 ## Flags
 
 | Flag | Purpose |
 |------|---------|
 | `--speak` | Spoken replies |
+| `--voice ...` | Installed Mac voice (default: Daniel, best available variant) |
 | `--low-mem` | 16GB profile (default on) |
-| `--full-mem` | Larger context / history |
+| `--full-mem` | 8,192-token context, longer replies and history |
 | `--model ...` | Ollama model |
 | `--num-ctx 2048` | Override context size |
 | `--workspace ...` | Safe file root |
+| `--full-access` | Files across storage within your Mac account's permissions |
 | `--once "..."` | One-shot |
 | `--menubar` | Menu-bar companion |
 | `--no-tools` | Chat only |
 | `--listen` | Local microphone input and spoken replies |
 | `--wake-word ...` | Voice activation phrase (default: jarvis) |
 | `--stt-model ...` | Whisper model (default: base) |
+| `--vision-model ...` | Camera/screen snapshot model (default: moondream) |
 | `--web` | Local orb, chat, and telemetry |
 | `--port 8765` | Web interface port |
 | `--data-dir ...` | Private memory/reminder directory |
 | `--doctor` | Ollama/model and optional dependency checks |
 | `--timeout 120` | Model request timeout in seconds |
 
-Env: `JARVIS_MODEL`, `JARVIS_WORKSPACE`, `JARVIS_DATA_DIR`, `JARVIS_VOICE`, `JARVIS_OLLAMA_URL`.
+Env: `JARVIS_MODEL`, `JARVIS_VISION_MODEL`, `JARVIS_WORKSPACE`, `JARVIS_DATA_DIR`, `JARVIS_VOICE`, `JARVIS_OLLAMA_URL`.
 
 ## Tips for smooth 16GB use
 
@@ -165,8 +203,8 @@ Google native: put OAuth desktop credentials at `~/.jarvis/google/credentials.js
 Cloudflare can host the static orb interface as a preview. The repository's
 `wrangler.jsonc` points to `./web`; run `npm ci` and `npm run check` to validate it
 locally. Follow [Cloudflare-deployment.md](Cloudflare-deployment.md) for the exact
-build settings and branch to deploy. Chat, Ollama, memory, telemetry, and desktop
-tools still run in the local Python application on your Mac.
+build settings and branch to deploy. Chat, Ollama, memory, telemetry, desktop
+tools, and hardware controls run in the local Python application on your Mac.
 
 ## Validation
 
@@ -175,7 +213,7 @@ python3 -m pip install -e .
 python3 -m unittest discover -s .
 ```
 
-Tests use fake model responses and mocked microphone/browser/network services. Real macOS permissions, speech hardware, downloaded voice models, Google OAuth, and Ollama inference must be verified on your Mac. `--doctor` checks installed Python dependencies and the selected Ollama model; it does not load Whisper or verify Chromium binaries or microphone access.
+Tests use fake model responses and mocked microphone, camera, screen, GPU, and network services. Real macOS permissions, GPU driver readings, speech hardware, downloaded voice models, Google OAuth, and Ollama inference must be verified on your Mac. `--doctor` checks installed Python dependencies and the selected Ollama model; it does not load Whisper or verify Chromium binaries or microphone access.
 
 ## OpenClaw
 

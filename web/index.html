@@ -28,6 +28,11 @@
     .preview-guide code { display:block; padding:12px; background:#06101a; border:1px solid var(--line); border-radius:7px; overflow-wrap:anywhere; font-size:12px; }
     .preview-guide a { display:inline-block; margin-top:14px; color:#d8f5ff; background:#164961; border:1px solid #2f81a4; border-radius:7px; padding:10px 15px; text-decoration:none; }
     .preview-guide a:focus-visible { outline:2px solid var(--blue); outline-offset:4px; }
+    .access-panel { margin-top:16px; padding:16px; border:1px solid var(--line); border-radius:9px; }
+    .access-panel h2 { margin:0 0 12px; font-size:14px; font-weight:500; }
+    .access-panel label { margin:0 15px 10px 0; font-size:12px; }
+    select,.voice-button { color:var(--ink); background:#102739; border:1px solid #204359; border-radius:5px; padding:6px; font:inherit; }
+    .voice-controls { margin-top:10px; display:flex; gap:8px; align-items:center; font-size:11px; }
   </style>
 </head>
 <body data-mode="workspace">
@@ -53,10 +58,17 @@
         <div class="metric"><div class="label">Memory</div><div id="memory" class="value">—</div><div id="memory-detail" class="detail">Waiting for metrics</div><div class="meter"><span id="memory-meter"></span></div></div>
         <div class="metric"><div class="label">Workspace disk</div><div id="disk" class="value">—</div><div id="disk-detail" class="detail">Waiting for metrics</div><div class="meter"><span id="disk-meter"></span></div></div>
         <div class="metric"><div class="label">Network throughput</div><div id="network" class="value">—</div><div id="network-detail" class="detail">Waiting for metrics</div></div>
-        <div class="metric"><div class="label">GPU</div><div class="value">—</div><div class="detail">Metrics unavailable</div></div>
+        <div class="metric"><div class="label">GPU</div><div id="gpu" class="value">—</div><div id="gpu-detail" class="detail">Waiting for metrics</div></div>
         <div class="metric"><div class="label">Session uptime</div><div id="uptime" class="value">—</div><div id="sample-time" class="detail">Samples every 5 seconds</div></div>
       </div>
-      <div class="policy">Controlled actions require approval in the CLI. Modes change this display; they do not enable a microphone.</div>
+      <section id="access-panel" class="access-panel" hidden>
+        <h2>Storage and model memory</h2>
+        <label><input id="full-access" type="checkbox">All permitted files</label>
+        <label><input id="full-memory" type="checkbox">Larger model context</label>
+        <p id="access-note" class="detail">File access follows macOS permissions. Larger context uses more RAM.</p>
+      </section>
+      <section id="device-panel" aria-label="Camera, microphone and screen controls"></section>
+      <div class="policy">Controlled actions require approval in the CLI. Device controls are separate from display modes.</div>
       <div id="monitor-errors" class="policy" role="status"></div>
     </section>
     <section class="conversation" aria-label="Conversation">
@@ -72,11 +84,14 @@
         </div>
         <form id="chat-form"><input type="text" id="prompt" aria-label="Message to JARVIS" placeholder="Ask JARVIS…" autocomplete="off" required><button id="send" type="submit">Send</button></form>
         <div class="compose-note"><span>Local session · messages sent to your configured model</span><label><input type="checkbox" id="speech">Read answers aloud</label></div>
+        <div id="voice-controls" class="voice-controls"><label for="voice-select">Mac voice</label><select id="voice-select" aria-label="Installed Mac voice"><option value="Daniel">Daniel · British</option></select><button id="stop-speech" class="voice-button" type="button">Stop voice</button></div>
         <div id="speech-note" class="detail"></div>
+        <audio id="speech-player" controls hidden style="width:100%;height:36px;margin-top:8px" aria-label="Jarvis spoken answer"></audio>
       </div>
     </section>
   </main>
   <script id="jarvis-config" type="application/json" nonce="__JARVIS_NONCE__">__JARVIS_BOOTSTRAP__</script>
+  <script nonce="__JARVIS_NONCE__" src="/devices.js"></script>
   <script nonce="__JARVIS_NONCE__">
     'use strict';
     const bootstrap = document.getElementById('jarvis-config').textContent.trim();
@@ -86,10 +101,10 @@
     const $ = id => document.getElementById(id);
     const tokenHeaders = { 'X-Jarvis-Token':config.csrfToken };
     let busy = false, speaking = false, mode = 'workspace', serverBusy = false;
+    let devices = null, speechGeneration = 0, speechAudio = null, speechURL = null;
     const seenReminders = new Set();
     $('prompt').maxLength = config.maxPromptChars;
     $('speech').checked = config.speakAnswers;
-    if (!('speechSynthesis' in window)) { $('speech').disabled = true; $('speech').checked = false; $('speech-note').textContent = 'Speech is unavailable in this browser.'; }
     function addMessage(speaker, text, kind = '') {
       const box = document.createElement('div'); box.className = 'message ' + kind;
       const label = document.createElement('span'); label.className = 'speaker'; label.textContent = speaker;
@@ -104,7 +119,7 @@
         return;
       }
       $('orb-caption').textContent = speaking ? 'Speaking, Sir.' : busy ? 'One moment, Sir.' : mode === 'standby' ? 'Standing by.' : 'At your service, Sir.';
-      $('orb-note').textContent = speaking ? 'Speaking aloud · microphone is off' : busy ? 'Working on your request · microphone is off' : 'Text input ready · microphone is off';
+      $('orb-note').textContent = speaking ? 'Speaking aloud · microphone recording paused' : busy ? 'Working on your request' : 'Ready · device controls below';
       $('turn-state').textContent = speaking ? 'Speaking' : busy || serverBusy ? 'Working' : 'Ready';
     }
     document.querySelectorAll('nav button').forEach(button => button.addEventListener('click', () => {
@@ -112,18 +127,45 @@
       document.querySelectorAll('nav button').forEach(other => other.setAttribute('aria-pressed', String(other === button)));
       updateOrbLabel();
     }));
-    $('speech').addEventListener('change', () => { if (!$('speech').checked && window.speechSynthesis) { window.speechSynthesis.cancel(); speaking = false; updateOrbLabel(); } });
-    function speak(text) {
-      if (!$('speech').checked || !window.speechSynthesis) return;
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      const voice = window.speechSynthesis.getVoices().find(v => v.name.toLowerCase().includes(config.voice.toLowerCase()));
-      if (voice) utterance.voice = voice;
-      utterance.lang = 'en-GB';
-      utterance.onstart = () => { speaking = true; updateOrbLabel(); };
-      utterance.onend = utterance.onerror = () => { speaking = false; updateOrbLabel(); };
-      $('speech-note').textContent = voice ? 'Browser voice: ' + voice.name : 'Using your browser’s available default voice.';
-      window.speechSynthesis.speak(utterance);
+    function stopSpeech() {
+      speechGeneration++;
+      if (speechAudio) { speechAudio.pause(); speechAudio.removeAttribute('src'); speechAudio.load(); speechAudio.hidden = true; speechAudio = null; }
+      if (speechURL) { URL.revokeObjectURL(speechURL); speechURL = null; }
+      speaking = false; if (devices) devices.setSpeaking(false); updateOrbLabel();
+    }
+    $('speech').addEventListener('change', () => { if (!$('speech').checked) stopSpeech(); });
+    $('stop-speech').addEventListener('click',stopSpeech);
+    async function speak(text) {
+      if (!$('speech').checked || !config.backendEnabled) return;
+      stopSpeech(); const generation = speechGeneration;
+      const voice = $('voice-select').value || config.voice;
+      speaking = true; if (devices) devices.setSpeaking(true); updateOrbLabel();
+      try {
+        const job = await api('/api/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text.slice(0,1600),voice})});
+        let result;
+        for (let i=0;i<150;i++) {
+          await wait(500); if (generation !== speechGeneration) return;
+          result = await api('/api/speech/'+encodeURIComponent(job.request_id));
+          if (result.status !== 'pending') break;
+        }
+        if (!result || result.status === 'pending') throw new Error('Voice generation took too long. Try again.');
+        if (result.status === 'error') throw new Error(result.error);
+        const response = await fetch('/api/speech/'+encodeURIComponent(job.request_id)+'/audio',{headers:tokenHeaders,cache:'no-store'});
+        if (!response.ok || !response.headers.get('Content-Type').startsWith('audio/')) throw new Error('Could not retrieve generated speech.');
+        const blob = await response.blob(); if (generation !== speechGeneration) return;
+        speechURL = URL.createObjectURL(blob); speechAudio = $('speech-player'); speechAudio.src=speechURL; speechAudio.hidden=false;
+        speechAudio.onplay = () => { if (generation === speechGeneration) { speaking=true; if (devices) devices.setSpeaking(true); updateOrbLabel(); } };
+        speechAudio.onpause = () => { if (generation === speechGeneration) { speaking=false; if (devices) devices.setSpeaking(false); updateOrbLabel(); } };
+        speechAudio.onended = () => { if (generation === speechGeneration) stopSpeech(); };
+        speechAudio.onerror = () => { if (generation === speechGeneration) { $('speech-note').textContent='Audio playback failed.'; stopSpeech(); } };
+        $('speech-note').textContent = 'Local Mac voice: '+voice;
+        try { await speechAudio.play(); }
+        catch (error) {
+          if (error.name !== 'NotAllowedError') throw error;
+          speaking=false; if (devices) devices.setSpeaking(false); updateOrbLabel();
+          $('speech-note').textContent='Press Play below to hear the '+voice+' voice.';
+        }
+      } catch (error) { if (generation === speechGeneration) { $('speech-note').textContent = error.message; stopSpeech(); } }
     }
     async function api(path, options = {}) {
       if (!config.backendEnabled) throw new Error('Open local Jarvis to use the assistant.');
@@ -133,9 +175,9 @@
       return data;
     }
     const wait = ms => new Promise(resolve => setTimeout(resolve,ms));
-    $('chat-form').addEventListener('submit', async event => {
-      event.preventDefault(); if (!config.backendEnabled || busy) return;
-      const prompt = $('prompt').value.trim(); if (!prompt) return;
+    async function submitChat(prompt) {
+      if (!config.backendEnabled || busy) return;
+      prompt = prompt.trim(); if (!prompt) return;
       busy = true; $('send').disabled = true; $('prompt').value = ''; updateOrbLabel();
       addMessage('YOU',prompt,'user');
       let requestId = null;
@@ -159,7 +201,40 @@
         }
       } catch (error) { addMessage('SYSTEM',error.message,'system'); }
       finally { busy = false; $('send').disabled = false; updateOrbLabel(); $('prompt').focus(); }
+    }
+    $('chat-form').addEventListener('submit',event => { event.preventDefault(); submitChat($('prompt').value); });
+    devices = window.JarvisDevices.mount({
+      container:$('device-panel'), enabled:config.backendEnabled, api, addMessage,
+      onTranscript:text => { if (busy || serverBusy) { $('prompt').value=text.slice(0,config.maxPromptChars); addMessage('SYSTEM','Transcript ready in the message box.','system'); } else submitChat(text); },
+      onAnalysis:reply => { addMessage('JARVIS',reply); speak(reply); }
     });
+    window.addEventListener('pagehide',stopSpeech);
+    function showSettings(state) {
+      $('full-access').checked = state.full_access;
+      $('full-memory').checked = state.full_memory;
+      $('access-note').textContent = (state.full_access ? 'All files allowed by macOS permissions' : 'Files within your workspace')+' · model context: '+state.context_tokens+' tokens';
+    }
+    for (const [id,key] of [['full-access','full_access'],['full-memory','full_memory']]) {
+      $(id).addEventListener('change',async () => {
+        $(id).disabled = true;
+        try { showSettings(await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[key]:$(id).checked})})); }
+        catch (error) { $(id).checked = !$(id).checked; $('access-note').textContent=error.message; }
+        finally { $(id).disabled = false; }
+      });
+    }
+    async function loadVoices() {
+      try {
+        const result = await api('/api/voices');
+        $('voice-select').replaceChildren();
+        for (const voice of result.voices) { const option=document.createElement('option'); option.value=voice.name; option.textContent=voice.name+' · '+voice.language; $('voice-select').append(option); }
+        const names=result.voices.map(v=>v.name);
+        const british=result.voices.filter(v=>v.language === 'en_GB' || v.language === 'en-GB');
+        const preferred = names.includes(result.preferred) ? result.preferred : (british.find(v=>v.name.includes(config.voice)) || {}).name;
+        if (preferred) $('voice-select').value=preferred;
+        else { const option=document.createElement('option'); option.value=config.voice; option.textContent=config.voice+' · install in macOS'; $('voice-select').prepend(option); $('voice-select').value=config.voice; }
+        $('speech-note').textContent='Native Mac speech; select an installed voice.';
+      } catch (error) { $('speech-note').textContent=error.message; }
+    }
     function size(bytes) { if (bytes == null) return 'Unavailable'; if (bytes < 1024) return bytes.toFixed(0) + ' B'; const units = ['KB','MB','GB','TB']; let value = bytes/1024,index = 0; while (value >= 1024 && index < units.length-1) { value/=1024; index++; } return value.toFixed(1) + ' ' + units[index]; }
     function setPercent(id, value) { $(id).textContent = value == null ? '—' : value.toFixed(1)+'%'; $(id+'-meter').style.width = Math.max(0,Math.min(100,value || 0))+'%'; }
     async function refreshStatus() {
@@ -167,14 +242,18 @@
         const state = await api('/api/status');
         $('connection').textContent = 'Local systems connected'; $('connection').classList.add('online');
         serverBusy = state.busy; updateOrbLabel();
+        if (state.settings && !$('full-access').disabled && !$('full-memory').disabled) showSettings(state.settings);
         setPercent('cpu',state.cpu_percent);
-        $('cpu-detail').textContent = state.cpu_percent == null ? (state.load_average ? 'Load: '+state.load_average.map(v=>v.toFixed(2)).join(' / ') : 'Install psutil for CPU metrics') : 'Current system utilization';
+        $('cpu-detail').textContent = state.cpu_percent == null ? 'Collecting CPU sample' : (state.cpu ? state.cpu.physical_cores+' physical / '+state.cpu.logical_cores+' logical cores' : 'Current system utilization');
+        $('cpu-detail').title = state.cpu && state.cpu.core_percent ? 'Per-core: '+state.cpu.core_percent.map(v=>v.toFixed(0)+'%').join(', ') : '';
         setPercent('memory',state.memory ? state.memory.percent : null);
-        $('memory-detail').textContent = state.memory ? size(state.memory.available_bytes)+' available' : 'Install psutil for memory metrics';
+        $('memory-detail').textContent = state.memory ? size(state.memory.used_bytes)+' used / '+size(state.memory.total_bytes)+' total · '+size(state.memory.available_bytes)+' available · Jarvis '+size(state.memory.process_rss_bytes)+(state.memory.swap ? ' · Swap '+size(state.memory.swap.used_bytes) : '') : 'Memory metrics unavailable';
         setPercent('disk',state.disk ? state.disk.percent : null);
         $('disk-detail').textContent = state.disk ? size(state.disk.free_bytes)+' free' : 'Disk metrics unavailable';
         $('network').textContent = state.network && state.network.received_bytes_per_second != null ? size(state.network.received_bytes_per_second)+'/s' : '—';
         $('network-detail').textContent = state.network ? 'Upload: '+size(state.network.sent_bytes_per_second)+'/s' : 'Install psutil for network metrics';
+        $('gpu').textContent = state.gpu && state.gpu.utilization_percent != null ? state.gpu.utilization_percent.toFixed(1)+'%' : '—';
+        $('gpu-detail').textContent = state.gpu ? state.gpu.name+(state.gpu.allocated_bytes != null ? ' · GPU allocated '+size(state.gpu.allocated_bytes) : '')+(state.gpu.frequency_mhz != null ? ' · '+state.gpu.frequency_mhz+' MHz' : '')+(state.gpu_reason ? ' · '+state.gpu_reason : '') : state.gpu_reason || 'GPU metrics unavailable';
         const seconds = Math.floor(state.uptime_seconds); $('uptime').textContent = seconds >= 3600 ? Math.floor(seconds/3600)+'h '+Math.floor(seconds%3600/60)+'m' : Math.floor(seconds/60)+'m '+seconds%60+'s';
         $('sample-time').textContent = 'Sampled '+new Date(state.timestamp).toLocaleTimeString();
         $('monitor-errors').textContent = (state.errors || []).join(' ');
@@ -183,6 +262,8 @@
       setTimeout(refreshStatus,5000);
     }
     if (config.backendEnabled) {
+      $('access-panel').hidden = false;
+      loadVoices();
       refreshStatus();
     } else {
       document.title = 'JARVIS · Orb interface preview';
@@ -192,11 +273,12 @@
       $('preview-guide').hidden = false;
       $('chat-form').hidden = true;
       document.querySelector('.compose-note').hidden = true;
+      $('voice-controls').hidden = true;
       $('prompt').disabled = $('send').disabled = $('speech').disabled = true;
       const greeting = $('messages').querySelector('p');
       greeting.textContent = 'Welcome, Sir. Open Jarvis on your Mac to begin a conversation.';
       document.querySelector('.policy').textContent = 'This hosted page previews the orb. Your conversations and computer controls stay in local Jarvis.';
-      for (const id of ['cpu-detail','memory-detail','disk-detail','network-detail','sample-time']) {
+      for (const id of ['cpu-detail','memory-detail','disk-detail','network-detail','gpu-detail','sample-time']) {
         $(id).textContent = 'Available in local Jarvis';
       }
       updateOrbLabel();
