@@ -18,7 +18,7 @@ class FakeClient:
         self.num_ctx = num_ctx
         self.messages = []
 
-    def chat(self, messages, *, reply_only=False):
+    def chat(self, messages, *, reply_only=False, allowed_tools=None):
         self.messages.append([dict(message) for message in messages])
         if not self.replies:
             raise AssertionError("Assistant requested an unexpected model round")

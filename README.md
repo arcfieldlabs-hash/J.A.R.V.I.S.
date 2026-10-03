@@ -144,6 +144,8 @@ The terminal also supports `:memory [query]`, `:remember a fact`, `:forget ID`, 
 
 Tool calls are bounded per request. Repeated identical actions are stopped, and the final model round accepts an answer only. If the model cannot finish its explanation, Jarvis reports the confirmed tool results, including any completed writes or other actions. Tool exchanges stay within the current request; later conversation turns receive completed user/reply pairs. Asking to assign research without a topic should prompt for the topic.
 
+Public-web research is built in through `research`, `web_search`, and `web_read`; it does not require Google credentials or code development. `google_native` is for Gmail, Calendar, and Drive. Research collects up to four source excerpts rather than an extensive autonomous report. Ask for a job's status or use `:jobs` in terminal chat; completion notifications and measured time estimates are not implemented.
+
 ## Let Jarvis build new tools
 
 Enable **code changes** in the local orb, or start with `--self-develop`. This switch starts off on a fresh installation and remembers your choice; it permits proposals but does not authorize running generated code. Jarvis can inspect its source and prepare either a standalone tool extension or a core code patch. Ask, for example:

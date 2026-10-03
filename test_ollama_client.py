@@ -107,6 +107,74 @@ class OllamaClientTests(unittest.TestCase):
         self.assertIsInstance(first["format"], dict)
         self.assertEqual(second["format"], "json")
 
+    def test_tool_chat_constrains_each_request_to_its_live_tool_names(self):
+        messages = [{"role": "user", "content": "Research this topic."}]
+        answer = '{"tool":"web_search","args":{"query":"topic"},"why":"Find sources"}'
+        with patch("jarvis.ollama_client.request.urlopen", side_effect=[self.response(answer), self.response()]) as urlopen:
+            self.assertEqual(self.client.chat(messages, allowed_tools=["web_search", "read_file", "web_search"]), answer)
+            self.client.chat(messages, allowed_tools=("web_search", "ext_research"))
+        first, second = [json.loads(call.args[0].data) for call in urlopen.call_args_list]
+        reply_schema = {
+            "type": "object",
+            "properties": {"reply": {"type": "string"}},
+            "required": ["reply"],
+            "additionalProperties": False,
+        }
+        self.assertEqual(first["format"], {"oneOf": [reply_schema, {
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string", "enum": ["web_search", "read_file"]},
+                "args": {"type": "object"},
+                "why": {"type": "string"},
+            },
+            "required": ["tool", "args"],
+            "additionalProperties": False,
+        }]})
+        self.assertEqual(second["format"]["oneOf"][1]["properties"]["tool"]["enum"], ["web_search", "ext_research"])
+        self.assertEqual(first["messages"], messages)
+        self.assertEqual(first["options"], {"temperature": 0.2, "num_ctx": 8192, "num_predict": 1024})
+        self.assertEqual(first["keep_alive"], "10m")
+        self.assertEqual(first["model"], "llama3.2:3b")
+        self.assertFalse(first["stream"])
+
+    def test_empty_tool_catalog_requests_only_a_reply(self):
+        for names in ([], ()):
+            with self.subTest(names=names):
+                with patch("jarvis.ollama_client.request.urlopen", return_value=self.response()) as urlopen:
+                    self.client.chat([], allowed_tools=names)
+                self.assertEqual(json.loads(urlopen.call_args.args[0].data)["format"], {
+                    "type": "object",
+                    "properties": {"reply": {"type": "string"}},
+                    "required": ["reply"],
+                    "additionalProperties": False,
+                })
+
+    def test_reply_only_takes_precedence_over_supplied_tool_catalog(self):
+        with patch("jarvis.ollama_client.request.urlopen", return_value=self.response()) as urlopen:
+            self.client.chat([], reply_only=True, allowed_tools=("web_search", "ext_research"))
+        response_format = json.loads(urlopen.call_args.args[0].data)["format"]
+        self.assertEqual(response_format["required"], ["reply"])
+        self.assertEqual(response_format["properties"], {"reply": {"type": "string"}})
+        self.assertFalse(response_format["additionalProperties"])
+        self.assertNotIn("oneOf", response_format)
+
+    def test_invalid_tool_catalog_fails_before_network_access(self):
+        invalid_catalogs = ["web_search", {"web_search": {}}, [None], [1], [""], [" web_search"], ["web_search "]]
+        with patch("jarvis.ollama_client.request.urlopen") as urlopen:
+            for names in invalid_catalogs:
+                with self.subTest(names=names):
+                    with self.assertRaisesRegex(ValueError, "Allowed tools"):
+                        self.client.chat([], allowed_tools=names)
+        urlopen.assert_not_called()
+
+    def test_supplied_tool_catalog_does_not_change_unsupplied_chat(self):
+        with patch("jarvis.ollama_client.request.urlopen", side_effect=[self.response(), self.response()]) as urlopen:
+            self.client.chat([], allowed_tools=["web_search"])
+            self.client.chat([])
+        first, second = [json.loads(call.args[0].data) for call in urlopen.call_args_list]
+        self.assertIsInstance(first["format"], dict)
+        self.assertEqual(second["format"], "json")
+
     def test_regular_chat_404_does_not_suggest_installing_vision_model(self):
         failure = error.HTTPError("http://127.0.0.1:11434/api/chat", 404, "Not found", {}, io.BytesIO(b"missing model"))
         with patch("jarvis.ollama_client.request.urlopen", side_effect=failure):
